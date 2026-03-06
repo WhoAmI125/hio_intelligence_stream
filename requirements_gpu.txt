@@ -1,0 +1,19 @@
+# ============================================================
+# CUDA GPU Requirements — Install BEFORE requirements.txt
+# ============================================================
+#
+# Usage (on AWS g4dn):
+#   sudo venv/bin/pip install --no-cache-dir -r requirements_gpu.txt
+#   sudo rm -rf /root/.cache/pip
+#   sudo venv/bin/pip install --no-cache-dir -r requirements.txt
+#
+# IMPORTANT:
+#   - Must be installed FIRST to prevent CPU torch overwrite
+#   - Use --no-cache-dir to avoid filling disk (~2.7GB cache)
+#   - Matches CUDA 12.1 (g4dn Tesla T4 driver 570.x)
+
+--index-url https://download.pytorch.org/whl/cu121
+
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121

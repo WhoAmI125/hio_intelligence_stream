@@ -1,0 +1,32 @@
+[Unit]
+Description=VLM Model Server (Florence-2 GPU + Tier-2 Pipeline)
+After=network.target
+Wants=vlm-db.service
+
+[Service]
+Type=simple
+User=vlmapp
+Group=vlmapp
+WorkingDirectory=/home/ubuntu/vlm_new_deploy
+Environment=PYTHONPATH=/home/ubuntu/vlm_new_deploy
+EnvironmentFile=/home/ubuntu/vlm_new_deploy/.env
+
+ExecStart=/home/ubuntu/vlm_new_deploy/venv/bin/uvicorn \
+    model_server.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --timeout-keep-alive 65 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vlm-model
+
+# GPU access
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=multi-user.target

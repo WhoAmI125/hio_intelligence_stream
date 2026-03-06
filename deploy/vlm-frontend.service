@@ -1,0 +1,28 @@
+[Unit]
+Description=VLM Frontend Server (Jinja2 UI + Reverse Proxy)
+After=network.target vlm-model.service vlm-db.service
+
+[Service]
+Type=simple
+User=vlmapp
+Group=vlmapp
+WorkingDirectory=/home/ubuntu/vlm_new_deploy
+Environment=PYTHONPATH=/home/ubuntu/vlm_new_deploy
+EnvironmentFile=/home/ubuntu/vlm_new_deploy/.env
+
+ExecStart=/home/ubuntu/vlm_new_deploy/venv/bin/uvicorn \
+    frontend_server.main:app \
+    --host 127.0.0.1 \
+    --port 8002 \
+    --workers 2 \
+    --timeout-keep-alive 65 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vlm-frontend
+
+[Install]
+WantedBy=multi-user.target
