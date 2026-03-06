@@ -1,0 +1,38 @@
+# 지능형 진화 CCTV 3-Tier 프로젝트 (VLM 분리)
+
+- [ ] **Phase 1: 구조 설계 및 계획 (현재)**
+  - [x] 요구사항 분석 및 아키텍처 (Model / DB / Frontend) 설계안 작성
+  - [x] 피드백 반영: Agent 파일 단일화, Shadow Agent 도입, 모델 서버 내 진화 로직(critic_trainer)
+  - [x] 피드백 반영: 프론트엔드 관제창 분리 (adhoc vs shadow)
+  - [x] 피드백 반영: 상세 모듈 이식, 런타임 제약, 구체적 실행 순서 확정
+  - [ ] 최종 사용자 승인
+
+- [ ] **Phase 2: Backend (Model Execution) 구현 및 코드 이식**
+  - *목표: 기존 단일 서버 기반의 로직들을 분리형(3-Tier)에 맞게 가져오되 동작 신뢰성은 유지.*
+  - [x] 1. Florence-2 Adapter ([adapters/florence_adapter.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/adapters/florence_adapter.py)) 이식 + 초기 로딩 최적화
+  - [x] 2. [caption_analyzer.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/caption_analyzer.py) + 시나리오별 키워드 엔진 구성 이식 (neutralizing, H2H 등)
+  - [x] 3. 단일 Agent ([dynamic_agent.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/agents/dynamic_agent.py)) + Prompt(.md) 로딩 구성 (Florence 캡션 후처리 및 Gemini 라우팅 연계)
+  - [x] 4. `pipeline_orchestrator.py` 구현 (위 1+2+3 개별 모듈 통합 제어)
+  - [x] 5. [stream_manager.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/stream_manager.py) (RTSP 멀티스트림 관리, 링버퍼 유지, 1 reader + N shared inference 등 모델 적용)
+  - [x] 6. [episode_manager.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_pipipeline/cctv/model_examine/vlm_pipeline/engine/episode_manager.py) + [evidence_router.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_pipipeline/cctv/model_examine/vlm_pipeline/engine/evidence_router.py) (키프레임 추출 + Uncertainty Gate) 및 [gemini_validator.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_pipipeline/cctv/model_examine/vlm_pipeline/engine/gemini_validator.py) 이식
+  - [x] 7. 로컬 스토리지([local_storage.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/local_storage.py)) + 클립/이벤트 디스크 저장
+  - [x] 8. [shadow_agent.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/agents/shadow_agent.py) 구현 및 비동기 피드백 루프 이식
+  - [x] 9. 모델 진화 로직 ([critic_trainer.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/evolution/critic_trainer.py), [rule_updater.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/evolution/rule_updater.py)) 연동
+  - [x] 10. Daily Flush 구동 모듈 ([flush_worker.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/model_server/flush_worker.py)) 및 재시도/폴백 구조 적용
+
+- [ ] **Phase 3: Backend (DB / Data) 구현**
+  - [x] 1. 기존 Django/FastAPI 마이그레이션 모듈 및 스키마(`models.py`) 재사용/이식 (Episode, EpisodeReview 등)
+  - [x] 2. 미디어 스토리지 전략 (S3/NAS/Local) 및 N일 보존 후 삭제 정책 구현
+  - [x] 3. Model -> DB 간 Flush 수신용 bulk API 및 Auth 적용 (Token 기반 등)
+  - [x] 4. Frontend 조회를 위한 페이징/필터 통합 API 구현
+
+- [ ] **Phase 4: Frontend (Web) 분리 구현**
+  - *목표: 기존 프론트 코딩(html, view logic) 재사용 및 망 분리 API 수정.*
+  - [x] 1. 기존 코드를 활용한 [adhoc_rtsp.html](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_pipipeline/cctv/model_examine/vlm_pipeline/templates/vlm_pipeline/adhoc_rtsp.html) 및 [views.py](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_new_deploy/frontend_server/views.py) 운영뷰 이식
+  - [x] 2. 기존 코드를 활용한 [monitor_shadow.html](file:///E:/02_StayG/00_CCTV_Motion_Detection/vlm_gravity/vlm_pipipeline/cctv/model_examine/vlm_pipeline/templates/vlm_pipeline/monitor_shadow.html) 섀도우 리뷰 뷰 이식
+  - [x] 3. 새로운 DB Server API 대응 URL 및 Endpoints 수정
+
+- [ ] **Phase 5: 통합 연동 및 테스트**
+  - [x] 1. Florence-2, CaptionAnalyzer 단위 테스트 및 기존 비디오/회귀 테스트 진행
+  - [x] 2. 메모리 사용량 측정 및 최적화 후, Model Server 단독 실행 검증체크), Gemini 장애 시 폴백(OpenVINO/Graceful) 테스트
+  - [ ] 3. Flush 네트워크 단절 시나리오 복구 테스트

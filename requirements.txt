@@ -1,0 +1,28 @@
+# Model Server (Tier 1 & Tier 2)
+transformers==4.46.3
+torch
+torchvision
+openvino
+google-genai
+opencv-python
+numpy
+Pillow
+requests
+
+# Database & Frontend Servers (API & Web)
+fastapi
+uvicorn
+python-multipart
+jinja2
+django  # For migrating existing EpisodeReview models
+# psycopg2-binary  # Uncomment if using PostgreSQL
+
+# Evolution (Shadow Mode & Critic)
+lightgbm
+scikit-learn
+pandas
+
+# LoRA Fine-tuning (optional — only needed for training)
+peft>=0.7.0
+datasets
+accelerate

@@ -1,0 +1,8 @@
+﻿
+google-genai
+# ADR-001: transformers 4.4
+6.3 怨좎젙 ??4.50+ Florence-2 
+源⑥쭚
+transformers==4.46.3
+
+

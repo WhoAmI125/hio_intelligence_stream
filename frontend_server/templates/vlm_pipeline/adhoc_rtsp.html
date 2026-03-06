@@ -1,0 +1,1031 @@
+﻿{% extends "vlm_pipeline/base_public.html" %}
+{% block title %}CCTV Live Monitor{% endblock %}
+{% block page_title %}CCTV Live Monitor{% endblock %}
+{% block page_subtitle %}Preview-first multi camera monitor. Click a camera to configure it in popup.{% endblock %}
+{% block top_actions %}
+<span id="globalStatus" class="pill warn">0 RUNNING</span>
+<button id="btnAddCamera" class="btn primary" type="button">+ Add Camera</button>
+<button id="btnStartAll" class="btn" type="button">Start All</button>
+<button id="btnStopAll" class="btn danger" type="button">Stop All</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .pill { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:6px 12px; font-size:12px; font-weight:800; background:#fff; }
+  .pill.ok { color:#0f7e4d; border-color:#9ed9bc; background:#eefaf3; }
+  .pill.warn { color:#8d5a05; border-color:#efd39e; background:#fff7e8; }
+  .pill.bad { color:#b11e47; border-color:#f3b9c8; background:#fff0f4; }
+  .btn { border:1px solid var(--line); border-radius:9px; padding:8px 12px; background:#fff; color:var(--text); font-size:13px; font-weight:800; cursor:pointer; }
+  .btn.primary { color:#fff; border-color:var(--accent); background:linear-gradient(135deg,#2a79e8,#1d67d7); }
+  .btn.danger { color:#94173e; border-color:#f1b8c7; background:#fff2f6; }
+  .btn.small { padding:6px 10px; font-size:12px; border-radius:8px; }
+
+  .grid { display:grid; grid-template-columns:repeat(auto-fill, minmax(320px, 1fr)); gap:12px; }
+  .cam-card {
+    border:1px solid var(--line);
+    border-radius:13px;
+    overflow:hidden;
+    background:#fff;
+    cursor:pointer;
+    box-shadow:0 10px 22px rgba(12, 29, 54, 0.08);
+    transition:transform .16s ease, box-shadow .16s ease;
+  }
+  .cam-card:hover { transform:translateY(-2px); box-shadow:0 16px 32px rgba(12, 29, 54, 0.12); }
+  .cam-thumb { position:relative; background:#101a2d; min-height:198px; }
+  .cam-live { width:100%; height:100%; object-fit:cover; display:block; }
+  .cam-overlay {
+    position:absolute; inset:0;
+    background:linear-gradient(to top, rgba(7,13,24,.72), rgba(7,13,24,.1) 40%, rgba(7,13,24,.08));
+    display:flex; flex-direction:column; justify-content:space-between;
+    pointer-events:none;
+  }
+  .cam-top { padding:9px 10px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .cam-name { color:#f3f7ff; font-weight:800; font-size:13px; text-shadow:0 2px 8px rgba(0,0,0,.35); }
+  .cam-bottom { padding:9px 10px; color:#dbe7f7; font-size:12px; }
+  .cam-foot { border-top:1px solid var(--line); padding:8px 10px; display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .cam-meta { font-size:12px; color:var(--sub); }
+
+  .empty {
+    border:1px dashed #bfd0e8;
+    border-radius:14px;
+    padding:28px;
+    text-align:center;
+    color:#456085;
+    background:#f7fbff;
+  }
+
+  .modal {
+    display:none;
+    position:fixed;
+    inset:0;
+    z-index:3000;
+    background:rgba(10,17,31,.55);
+    align-items:center;
+    justify-content:center;
+    padding:10px;
+  }
+  .modal.open { display:flex; }
+  .modal-card {
+    width:min(1420px, 99vw);
+    max-height:96vh;
+    overflow:hidden;
+    border-radius:14px;
+    background:#fff;
+    border:1px solid var(--line);
+    box-shadow:0 24px 62px rgba(9,17,31,.32);
+    display:flex;
+    flex-direction:column;
+  }
+  .modal-head {
+    padding:12px 14px;
+    border-bottom:1px solid var(--line);
+    display:flex;
+    justify-content:space-between;
+    align-items:center;
+    gap:8px;
+  }
+  .modal-title { font-size:14px; font-weight:800; }
+  .modal-body { padding:12px 14px; overflow:auto; }
+  .modal-grid { display:grid; grid-template-columns:1.75fr .95fr; gap:12px; }
+
+  .live-wrap {
+    position:relative;
+    border-radius:12px;
+    overflow:hidden;
+    background:#0f182a;
+    user-select:none;
+    aspect-ratio:16/9;
+  }
+  .live-wrap:fullscreen, .live-wrap:-webkit-full-screen { width:100vw; height:100vh; border-radius:0; }
+  .live-wrap:fullscreen #setLive, .live-wrap:-webkit-full-screen #setLive { width:100%; height:100%; object-fit:contain; }
+  #setLive { width:100%; height:100%; object-fit:contain; display:block; }
+  #zoneCanvas {
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    cursor:crosshair;
+    z-index:4;
+    touch-action:none;
+    pointer-events:auto;
+  }
+
+  .status-box { margin-top:10px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .status-row { display:grid; grid-template-columns:100px minmax(0,1fr); border-top:1px solid var(--line); }
+  .status-row:first-child { border-top:none; }
+  .status-k, .status-v { padding:7px 9px; font-size:12px; }
+  .status-k { background:#f5f9ff; color:#2f4767; font-weight:800; }
+  .status-v { color:#1d314a; overflow-wrap:anywhere; }
+
+  .fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:0; }
+  .field.full { grid-column:span 2; }
+  .field label { font-size:12px; color:var(--sub); font-weight:700; }
+  .field input,.field select { border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:13px; background:#fff; outline:none; color:var(--text); }
+
+  .actions { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
+  .zone-editor { margin-top:10px; border:1px solid var(--line); border-radius:10px; padding:8px; background:#f9fcff; }
+  .zone-tools { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  .zbtn.active { color:#fff; border-color:#1d67d7; background:linear-gradient(135deg,#2a79e8,#1d67d7); }
+  .zone-meta { margin-top:7px; font-size:12px; color:#2f4767; font-weight:700; }
+  .roi-box { margin-top:10px; border:1px solid var(--line); border-radius:10px; padding:8px; background:#f8fbff; }
+  .roi-tools { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-bottom:6px; }
+  #setRoiImage { width:100%; aspect-ratio:16/10; object-fit:contain; border:1px solid var(--line); border-radius:8px; background:#101a2d; display:none; }
+  #setRoiImage.show { display:block; }
+  .explain-box {
+    margin-top:10px;
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:8px;
+    background:#f7fbff;
+  }
+  .explain-title { font-size:12px; font-weight:800; color:#2f4767; margin-bottom:6px; }
+  .explain-text { font-size:12px; color:#1d314a; line-height:1.45; white-space:pre-wrap; }
+  .cap-box {
+    margin-top:10px;
+    border:1px solid var(--line);
+    border-radius:10px;
+    padding:8px;
+    background:#fff;
+  }
+  .cap-title { font-size:12px; font-weight:800; color:#2f4767; margin-bottom:6px; }
+  .cap-text {
+    min-height:68px;
+    max-height:170px;
+    overflow:auto;
+    border:1px solid var(--line);
+    border-radius:8px;
+    padding:8px;
+    background:#f9fcff;
+    font-size:12px;
+    color:#1d314a;
+    line-height:1.45;
+    white-space:pre-wrap;
+  }
+
+  .note { font-size:12px; color:var(--sub); }
+
+  @media (max-width:980px) {
+    .modal-grid { grid-template-columns:1fr; }
+    .fields { grid-template-columns:1fr; }
+    .field.full { grid-column:span 1; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<section id="camGrid" class="grid"></section>
+<div id="emptyState" class="empty" style="display:none;">
+  <div style="font-weight:800; margin-bottom:8px;">등록된 카메라가 없습니다.</div>
+  <div class="note" style="margin-bottom:12px;">Add Camera로 카메라를 추가하면 미리보기 카드가 생성됩니다.</div>
+  <button id="btnEmptyAdd" class="btn primary" type="button">+ Add Camera</button>
+</div>
+
+<div id="addModal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card" style="max-width:560px;">
+    <div class="modal-head">
+      <div class="modal-title">Add Camera</div>
+      <button id="btnAddClose" class="btn small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="fields">
+        <div class="field"><label for="aCamId">Camera ID</label><input id="aCamId" placeholder="adhoc_cam" /></div>
+        <div class="field"><label for="aBaseFps">Base FPS</label><input id="aBaseFps" value="1.5" /></div>
+        <div class="field full"><label for="aRtsp">RTSP URL</label><input id="aRtsp" placeholder="rtsp://user:pass@host:554/..." /></div>
+      </div>
+      <div class="actions">
+        <button id="btnAddSave" class="btn" type="button">Save</button>
+        <button id="btnAddSaveStart" class="btn primary" type="button">Save + Start</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="setModal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title" id="setTitle">Camera Settings</div>
+      <button id="btnSetClose" class="btn small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-grid">
+        <section>
+          <div id="setLiveWrap" class="live-wrap">
+            <img id="setLive" alt="live" />
+            <canvas id="zoneCanvas"></canvas>
+          </div>
+          <div class="status-box">
+            <div class="status-row"><div class="status-k">Status</div><div id="stStatus" class="status-v">-</div></div>
+            <div class="status-row"><div class="status-k">FPS</div><div id="stFps" class="status-v">-</div></div>
+            <div class="status-row"><div class="status-k">Last Event</div><div id="stEvent" class="status-v">-</div></div>
+            <div class="status-row"><div class="status-k">Gemini</div><div id="stGemini" class="status-v">-</div></div>
+            <div class="status-row"><div class="status-k">Error</div><div id="stError" class="status-v">-</div></div>
+          </div>
+          <div class="zone-editor">
+            <div class="zone-tools">
+              <strong class="note">ROI Zone Edit</strong>
+              <button id="btnZoneCashier" class="btn small zbtn active" type="button">Cashier</button>
+              <button id="btnZoneDrawer" class="btn small zbtn" type="button">Drawer</button>
+              <button id="btnZoneUndo" class="btn small" type="button">Undo</button>
+              <button id="btnZoneClear" class="btn small" type="button">Clear</button>
+              <button id="btnZoneApply" class="btn small primary" type="button">Apply Zones</button>
+            </div>
+            <div id="zoneMeta" class="zone-meta">cashier:0 | drawer:0</div>
+            <div class="note">영상 위를 클릭해 점을 찍으세요. 최소 3점부터 polygon 적용됩니다.</div>
+          </div>
+          <div class="explain-box">
+            <div class="explain-title">ROI + Global 설명</div>
+            <div id="stExplain" class="explain-text">-</div>
+          </div>
+          <div class="cap-box">
+            <div class="cap-title">Florence ROI Input (Cash)</div>
+            <div id="stRoiCaption" class="cap-text">-</div>
+          </div>
+          <div class="cap-box">
+            <div class="cap-title">Florence Global Input</div>
+            <div id="stGlobalCaption" class="cap-text">-</div>
+          </div>
+        </section>
+
+        <section>
+          <div class="fields">
+            <div class="field"><label for="sCamId">Camera ID</label><input id="sCamId" readonly /></div>
+            <div class="field"><label for="sBaseFps">Base FPS</label><input id="sBaseFps" /></div>
+            <div class="field full"><label for="sRtsp">RTSP URL</label><input id="sRtsp" /></div>
+            <div class="field"><label for="sTransport">Transport</label><input id="sTransport" value="tcp" /></div>
+            <div class="field"><label for="sEvidenceMode">Evidence Mode</label>
+              <select id="sEvidenceMode">
+                <option value="hybrid">hybrid</option>
+                <option value="video_first">video_first</option>
+                <option value="video_only">video_only</option>
+                <option value="images_first">images_first</option>
+                <option value="storyboard">storyboard</option>
+                <option value="image">image</option>
+              </select>
+            </div>
+            <div class="field"><label for="sOpenTimeout">Open Timeout(ms)</label><input id="sOpenTimeout" value="8000" /></div>
+            <div class="field"><label for="sReadTimeout">Read Timeout(ms)</label><input id="sReadTimeout" value="8000" /></div>
+            <div class="field"><label for="sCooldown">Cooldown(sec)</label><input id="sCooldown" value="20" /></div>
+            <div class="field"><label for="sClipSec">Clip(sec)</label><input id="sClipSec" value="10" /></div>
+            <div class="field"><label for="sValidationSec">Validation(sec)</label><input id="sValidationSec" value="10" /></div>
+          </div>
+
+          <div class="actions">
+            <button id="btnSetSave" class="btn" type="button">Save</button>
+            <button id="btnSetSaveStart" class="btn primary" type="button">Save + Start</button>
+            <button id="btnSetStart" class="btn primary" type="button">Start</button>
+            <button id="btnSetStop" class="btn danger" type="button">Stop</button>
+            <button id="btnSetFull" class="btn" type="button">Full Screen</button>
+            <button id="btnSetRoiOnly" class="btn" type="button">ROI Only</button>
+            <button id="btnSetDelete" class="btn danger" type="button">Remove</button>
+          </div>
+
+          <div class="roi-box">
+            <div class="roi-tools">
+              <label class="note"><input id="sRoiToggle" type="checkbox" /> ROI preview</label>
+              <select id="sRoiZone">
+                <option value="cashier">cashier</option>
+                <option value="drawer">drawer</option>
+              </select>
+              <button id="btnRoiRefresh" class="btn small" type="button">Refresh</button>
+            </div>
+            <img id="setRoiImage" alt="roi" />
+            <div class="note">ROI는 zone 좌표가 있어야 실제 crop으로 보입니다.</div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="roiModal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title" id="roiTitle">ROI Only</div>
+      <button id="btnRoiClose" class="btn small" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="roi-tools" style="margin-bottom:10px;">
+        <label class="note" for="roiZone">Zone</label>
+        <select id="roiZone"><option value="cashier">cashier</option><option value="drawer">drawer</option></select>
+        <button id="btnRoiReload" class="btn small" type="button">Refresh</button>
+        <span id="roiMeta" class="note" style="margin-left:auto;">-</span>
+      </div>
+      <img id="roiImage" alt="roi-only" style="width:100%;max-height:74vh;object-fit:contain;border:1px solid var(--line);border-radius:10px;background:#101a2d;" />
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  const LS_KEY = "adhoc_multi_cctv_v3";
+  const LS_ZONE_KEY = "adhoc_zone_norm_v1";
+  const POLL_MS = 2500;
+
+  let cameras = {};
+  let zoneState = {};
+  let zoneMode = "cashier";
+  const statusCache = {};
+  let selectedCameraId = "";
+  let pollTimer = null;
+
+  let roiModalCameraId = "";
+  let roiModalTimer = null;
+
+  const esc = (s) => String(s || "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const fmtTs = (iso) => {
+    try {
+      const d = new Date(iso);
+      return Number.isNaN(d.getTime()) ? (iso || "-") : d.toLocaleString();
+    } catch {
+      return iso || "-";
+    }
+  };
+  const validRtsp = (raw) => {
+    try {
+      const u = new URL(String(raw || "").trim());
+      return (u.protocol === "rtsp:" || u.protocol === "rtsps:") && Boolean(u.hostname);
+    } catch {
+      return false;
+    }
+  };
+
+  const camGrid = document.getElementById("camGrid");
+  const emptyState = document.getElementById("emptyState");
+  const globalStatus = document.getElementById("globalStatus");
+
+  const addModal = document.getElementById("addModal");
+  const aCamId = document.getElementById("aCamId");
+  const aBaseFps = document.getElementById("aBaseFps");
+  const aRtsp = document.getElementById("aRtsp");
+
+  const setModal = document.getElementById("setModal");
+  const setTitle = document.getElementById("setTitle");
+  const setLive = document.getElementById("setLive");
+  const setLiveWrap = document.getElementById("setLiveWrap");
+  const zoneCanvas = document.getElementById("zoneCanvas");
+  const zoneCtx = zoneCanvas.getContext("2d");
+  const zoneMeta = document.getElementById("zoneMeta");
+  const sCamId = document.getElementById("sCamId");
+  const sRtsp = document.getElementById("sRtsp");
+  const sBaseFps = document.getElementById("sBaseFps");
+  const sTransport = document.getElementById("sTransport");
+  const sOpenTimeout = document.getElementById("sOpenTimeout");
+  const sReadTimeout = document.getElementById("sReadTimeout");
+  const sCooldown = document.getElementById("sCooldown");
+  const sClipSec = document.getElementById("sClipSec");
+  const sValidationSec = document.getElementById("sValidationSec");
+  const sEvidenceMode = document.getElementById("sEvidenceMode");
+  const stStatus = document.getElementById("stStatus");
+  const stFps = document.getElementById("stFps");
+  const stEvent = document.getElementById("stEvent");
+  const stGemini = document.getElementById("stGemini");
+  const stError = document.getElementById("stError");
+  const stExplain = document.getElementById("stExplain");
+  const stRoiCaption = document.getElementById("stRoiCaption");
+  const stGlobalCaption = document.getElementById("stGlobalCaption");
+  const sRoiToggle = document.getElementById("sRoiToggle");
+  const sRoiZone = document.getElementById("sRoiZone");
+  const setRoiImage = document.getElementById("setRoiImage");
+  const btnZoneCashier = document.getElementById("btnZoneCashier");
+  const btnZoneDrawer = document.getElementById("btnZoneDrawer");
+  const btnZoneUndo = document.getElementById("btnZoneUndo");
+  const btnZoneClear = document.getElementById("btnZoneClear");
+  const btnZoneApply = document.getElementById("btnZoneApply");
+
+  const roiModal = document.getElementById("roiModal");
+  const roiTitle = document.getElementById("roiTitle");
+  const roiZone = document.getElementById("roiZone");
+  const roiMeta = document.getElementById("roiMeta");
+  const roiImage = document.getElementById("roiImage");
+
+  function cameraIds() {
+    return Object.keys(cameras);
+  }
+
+  function loadStorage() {
+    try {
+      cameras = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
+      if (!cameras || typeof cameras !== "object") cameras = {};
+    } catch {
+      cameras = {};
+    }
+  }
+
+  function saveStorage() {
+    localStorage.setItem(LS_KEY, JSON.stringify(cameras));
+  }
+
+  function loadZoneStorage() {
+    try {
+      zoneState = JSON.parse(localStorage.getItem(LS_ZONE_KEY) || "{}");
+      if (!zoneState || typeof zoneState !== "object") zoneState = {};
+    } catch {
+      zoneState = {};
+    }
+  }
+
+  function saveZoneStorage() {
+    localStorage.setItem(LS_ZONE_KEY, JSON.stringify(zoneState));
+  }
+
+  function ensureZonePack(cameraId) {
+    if (!zoneState[cameraId] || typeof zoneState[cameraId] !== "object") {
+      zoneState[cameraId] = { cashier: [], drawer: [] };
+    }
+    if (!Array.isArray(zoneState[cameraId].cashier)) zoneState[cameraId].cashier = [];
+    if (!Array.isArray(zoneState[cameraId].drawer)) zoneState[cameraId].drawer = [];
+    return zoneState[cameraId];
+  }
+
+  function migrateLegacyZone(cameraId) {
+    if (zoneState[cameraId]) return;
+    try {
+      const legacy = JSON.parse(localStorage.getItem(`zone_poly_${cameraId}`) || "{}");
+      if (!legacy || typeof legacy !== "object") return;
+      const norm = (arr) => Array.isArray(arr)
+        ? arr.filter((p) => Array.isArray(p) && p.length >= 2)
+          .map((p) => [Number(p[0]), Number(p[1])])
+          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[0] >= 0 && p[0] <= 1 && p[1] >= 0 && p[1] <= 1)
+        : [];
+      zoneState[cameraId] = {
+        cashier: norm(legacy.cashier),
+        drawer: norm(legacy.drawer),
+      };
+      saveZoneStorage();
+    } catch {}
+  }
+
+  function setZoneMode(mode) {
+    zoneMode = mode === "drawer" ? "drawer" : "cashier";
+    btnZoneCashier.classList.toggle("active", zoneMode === "cashier");
+    btnZoneDrawer.classList.toggle("active", zoneMode === "drawer");
+    drawZoneCanvas();
+  }
+
+  function zoneCountsText(cameraId) {
+    const z = ensureZonePack(cameraId);
+    return `cashier:${z.cashier.length} | drawer:${z.drawer.length} | mode:${zoneMode}`;
+  }
+
+  function updateZoneMeta() {
+    if (!selectedCameraId) {
+      zoneMeta.textContent = "cashier:0 | drawer:0";
+      return;
+    }
+    zoneMeta.textContent = zoneCountsText(selectedCameraId);
+  }
+
+  function getRenderBox() {
+    const cw = Math.max(1, zoneCanvas.width || 1);
+    const ch = Math.max(1, zoneCanvas.height || 1);
+    const iw = Math.max(1, setLive.naturalWidth || cw);
+    const ih = Math.max(1, setLive.naturalHeight || ch);
+    const scale = Math.min(cw / iw, ch / ih);
+    const rw = iw * scale;
+    const rh = ih * scale;
+    const ox = (cw - rw) / 2;
+    const oy = (ch - rh) / 2;
+    return { cw, ch, iw, ih, rw, rh, ox, oy };
+  }
+
+  function resizeZoneCanvas() {
+    const r = setLiveWrap.getBoundingClientRect();
+    const w = Math.max(1, Math.floor(r.width));
+    const h = Math.max(1, Math.floor(r.height));
+    if (zoneCanvas.width !== w || zoneCanvas.height !== h) {
+      zoneCanvas.width = w;
+      zoneCanvas.height = h;
+    }
+    drawZoneCanvas();
+  }
+
+  function drawPolyNorm(pts, stroke, fill, label, y, box) {
+    if (!Array.isArray(pts) || !pts.length) return;
+    const mapped = pts.map((p) => [box.ox + p[0] * box.rw, box.oy + p[1] * box.rh]);
+    zoneCtx.save();
+    zoneCtx.lineWidth = 2;
+    zoneCtx.strokeStyle = stroke;
+    zoneCtx.fillStyle = fill;
+    zoneCtx.beginPath();
+    zoneCtx.moveTo(mapped[0][0], mapped[0][1]);
+    for (let i = 1; i < mapped.length; i += 1) zoneCtx.lineTo(mapped[i][0], mapped[i][1]);
+    if (mapped.length >= 3) {
+      zoneCtx.closePath();
+      zoneCtx.fill();
+    }
+    zoneCtx.stroke();
+    for (const [x, yv] of mapped) {
+      zoneCtx.beginPath();
+      zoneCtx.arc(x, yv, 4, 0, Math.PI * 2);
+      zoneCtx.fillStyle = stroke;
+      zoneCtx.fill();
+    }
+    zoneCtx.fillStyle = "rgba(8,18,34,.74)";
+    zoneCtx.fillRect(10, y, 144, 22);
+    zoneCtx.fillStyle = "#fff";
+    zoneCtx.font = "bold 12px sans-serif";
+    zoneCtx.fillText(label, 16, y + 15);
+    zoneCtx.restore();
+  }
+
+  function drawZoneCanvas() {
+    zoneCtx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
+    if (!selectedCameraId || zoneCanvas.width < 2 || zoneCanvas.height < 2) return;
+    const box = getRenderBox();
+    const z = ensureZonePack(selectedCameraId);
+    drawPolyNorm(z.cashier, "rgba(234,179,8,0.96)", "rgba(234,179,8,0.15)", "CASHIER", 10, box);
+    drawPolyNorm(z.drawer, "rgba(59,130,246,0.96)", "rgba(59,130,246,0.15)", "DRAWER", 38, box);
+  }
+
+  function loadZonesIntoEditor(cameraId) {
+    migrateLegacyZone(cameraId);
+    ensureZonePack(cameraId);
+    updateZoneMeta();
+    drawZoneCanvas();
+  }
+
+  function addZonePoint(ev) {
+    ev.preventDefault();
+    if (!selectedCameraId) return;
+    const box = getRenderBox();
+    const rect = zoneCanvas.getBoundingClientRect();
+    const point = (ev.touches && ev.touches[0]) ? ev.touches[0] : ev;
+    const x = point.clientX - rect.left;
+    const y = point.clientY - rect.top;
+    const nx = (x - box.ox) / Math.max(box.rw, 1);
+    const ny = (y - box.oy) / Math.max(box.rh, 1);
+    const z = ensureZonePack(selectedCameraId);
+    z[zoneMode].push([Math.max(0, Math.min(1, nx)), Math.max(0, Math.min(1, ny))]);
+    saveZoneStorage();
+    updateZoneMeta();
+    drawZoneCanvas();
+  }
+
+  function undoZonePoint() {
+    if (!selectedCameraId) return;
+    const z = ensureZonePack(selectedCameraId);
+    z[zoneMode].pop();
+    saveZoneStorage();
+    updateZoneMeta();
+    drawZoneCanvas();
+  }
+
+  function clearZonePoints() {
+    if (!selectedCameraId) return;
+    const z = ensureZonePack(selectedCameraId);
+    z[zoneMode] = [];
+    saveZoneStorage();
+    updateZoneMeta();
+    drawZoneCanvas();
+  }
+
+  function toPixelZones(cameraId) {
+    const z = ensureZonePack(cameraId);
+    const iw = Math.max(1, setLive.naturalWidth || 1280);
+    const ih = Math.max(1, setLive.naturalHeight || 720);
+    const toPx = (arr) => arr.map((p) => [Math.round(p[0] * iw), Math.round(p[1] * ih)]);
+    return { cashier: toPx(z.cashier), drawer: toPx(z.drawer) };
+  }
+
+  async function applyZonesToServer() {
+    if (!selectedCameraId) return;
+    const px = toPixelZones(selectedCameraId);
+    const { ok, data } = await postJson("/api/vlm/zones/", {
+      camera_id: selectedCameraId,
+      cashier_zone: px.cashier,
+      drawer_zone: px.drawer,
+    });
+    if (!ok || !data.success) {
+      alert(`Apply zones failed: ${data.error || "unknown"}`);
+      return;
+    }
+    zoneMeta.textContent = `${zoneCountsText(selectedCameraId)} | applied ${new Date().toLocaleTimeString()}`;
+    syncSettingsRoi();
+  }
+
+  function normalizeCamera(cam) {
+    return {
+      camera_id: String(cam.camera_id || "").trim(),
+      rtsp_url: String(cam.rtsp_url || "").trim(),
+      base_fps: Number(cam.base_fps || 1.5),
+      rtsp_transport: String(cam.rtsp_transport || "tcp").trim() || "tcp",
+      open_timeout_ms: Number(cam.open_timeout_ms || 8000),
+      read_timeout_ms: Number(cam.read_timeout_ms || 8000),
+      event_cooldown_sec: Number(cam.event_cooldown_sec || 20),
+      clip_duration_sec: Number(cam.clip_duration_sec || 10),
+      validation_clip_sec: Number(cam.validation_clip_sec || 10),
+      evidence_mode: String(cam.evidence_mode || "hybrid"),
+      use_video_validation: true,
+    };
+  }
+
+  function cardHTML(camId) {
+    return `
+      <article class="cam-card" data-camera="${esc(camId)}" title="Click to open settings">
+        <div class="cam-thumb">
+          <img class="cam-live" src="/api/vlm/video/?camera_id=${encodeURIComponent(camId)}" alt="${esc(camId)} live" />
+          <div class="cam-overlay">
+            <div class="cam-top">
+              <div class="cam-name">${esc(camId)}</div>
+              <span class="pill warn card-pill">STOPPED</span>
+            </div>
+            <div class="cam-bottom card-summary">status loading...</div>
+          </div>
+        </div>
+        <div class="cam-foot">
+          <span class="cam-meta">Click to configure</span>
+          <button class="btn small" data-action="open" data-camera="${esc(camId)}" type="button">Settings</button>
+        </div>
+      </article>
+    `;
+  }
+
+  function renderGrid() {
+    const ids = cameraIds();
+    emptyState.style.display = ids.length ? "none" : "block";
+    camGrid.innerHTML = ids.map((camId) => cardHTML(camId)).join("");
+    ids.forEach((camId) => applyCardStatus(camId, statusCache[camId] || null));
+  }
+
+  function applyCardStatus(camId, status) {
+    const card = camGrid.querySelector(`.cam-card[data-camera="${CSS.escape(camId)}"]`);
+    if (!card) return;
+
+    const pill = card.querySelector(".card-pill");
+    const summary = card.querySelector(".card-summary");
+    if (!status) {
+      pill.textContent = "UNKNOWN";
+      pill.className = "pill warn card-pill";
+      summary.textContent = "status unavailable";
+      return;
+    }
+
+    const running = !!status.running;
+    const state = String(status.status || (running ? "running" : "stopped"));
+    if (!running) {
+      pill.textContent = "STOPPED";
+      pill.className = "pill warn card-pill";
+    } else if (state.toLowerCase() === "error") {
+      pill.textContent = "ERROR";
+      pill.className = "pill bad card-pill";
+    } else {
+      pill.textContent = state.toUpperCase();
+      pill.className = "pill ok card-pill";
+    }
+
+    const recent = Array.isArray(status.recent_events) ? status.recent_events : [];
+    const last = recent.length ? recent[recent.length - 1] : null;
+    const eventText = last ? `${last.event_type || last.scenario || "-"} (${Number(last.confidence || 0).toFixed(2)})` : "-";
+    summary.textContent = `fps ${Number(status.current_fps || 0).toFixed(2)} / ${Number(status.stream_fps || 0).toFixed(2)} | event ${eventText}`;
+  }
+
+  function updateGlobalStatus() {
+    const ids = cameraIds();
+    let running = 0;
+    ids.forEach((id) => { if (statusCache[id] && statusCache[id].running) running += 1; });
+    globalStatus.textContent = `${running} RUNNING`;
+    if (running === 0) globalStatus.className = "pill warn";
+    else if (running === ids.length) globalStatus.className = "pill ok";
+    else globalStatus.className = "pill bad";
+  }
+
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, data };
+  }
+
+  async function fetchStatus(camId) {
+    try {
+      const res = await fetch(`/api/vlm/status/?camera_id=${encodeURIComponent(camId)}`);
+      const data = await res.json();
+      statusCache[camId] = data;
+      applyCardStatus(camId, data);
+      if (setModal.classList.contains("open") && selectedCameraId === camId) {
+        bindSettingsStatus(data);
+        drawZoneCanvas();
+        syncSettingsRoi();
+      }
+      return data;
+    } catch {
+      statusCache[camId] = null;
+      applyCardStatus(camId, null);
+      return null;
+    }
+  }
+
+  async function pollStatuses() {
+    const ids = cameraIds();
+    if (!ids.length) {
+      updateGlobalStatus();
+      return;
+    }
+    await Promise.all(ids.map((id) => fetchStatus(id)));
+    updateGlobalStatus();
+  }
+
+  async function startCamera(camId) {
+    const cfg = cameras[camId];
+    if (!cfg) return;
+    const { ok, data } = await postJson("/api/vlm/start/", cfg);
+    if (!ok || !data.success) {
+      alert(`Start failed: ${data.error || "unknown"}`);
+      return;
+    }
+    await fetchStatus(camId);
+  }
+
+  async function stopCamera(camId) {
+    const { ok, data } = await postJson(`/api/vlm/stop/?camera_id=${encodeURIComponent(camId)}`, {});
+    if (!ok || data.success === false) {
+      alert(`Stop failed: ${data.error || "unknown"}`);
+      return;
+    }
+    await fetchStatus(camId);
+  }
+
+  async function startAll() {
+    for (const id of cameraIds()) await startCamera(id);
+  }
+
+  async function stopAll() {
+    for (const id of cameraIds()) await stopCamera(id);
+  }
+
+  function openAddModal() {
+    aCamId.value = "";
+    aRtsp.value = "";
+    aBaseFps.value = "1.5";
+    addModal.classList.add("open");
+  }
+  function closeAddModal() { addModal.classList.remove("open"); }
+
+  function addCamera(startAfter) {
+    const camId = String(aCamId.value || "").trim();
+    const rtsp = String(aRtsp.value || "").trim();
+    const baseFps = Number(aBaseFps.value || 1.5);
+    if (!camId) return alert("Camera ID is required.");
+    if (!validRtsp(rtsp)) return alert("Valid RTSP URL is required.");
+
+    cameras[camId] = normalizeCamera({ camera_id: camId, rtsp_url: rtsp, base_fps: baseFps });
+    saveStorage();
+    renderGrid();
+    closeAddModal();
+    if (startAfter) startCamera(camId);
+  }
+
+  function openSettings(camId) {
+    const cfg = cameras[camId];
+    if (!cfg) return;
+    selectedCameraId = camId;
+    setZoneMode("cashier");
+    setTitle.textContent = `Camera Settings - ${camId}`;
+    setLive.src = `/api/vlm/video/?camera_id=${encodeURIComponent(camId)}`;
+
+    sCamId.value = cfg.camera_id || camId;
+    sRtsp.value = cfg.rtsp_url || "";
+    sBaseFps.value = String(cfg.base_fps ?? 1.5);
+    sTransport.value = cfg.rtsp_transport || "tcp";
+    sOpenTimeout.value = String(cfg.open_timeout_ms ?? 8000);
+    sReadTimeout.value = String(cfg.read_timeout_ms ?? 8000);
+    sCooldown.value = String(cfg.event_cooldown_sec ?? 20);
+    sClipSec.value = String(cfg.clip_duration_sec ?? 10);
+    sValidationSec.value = String(cfg.validation_clip_sec ?? 10);
+    sEvidenceMode.value = cfg.evidence_mode || "hybrid";
+
+    loadZonesIntoEditor(camId);
+    bindSettingsStatus(statusCache[camId] || null);
+    setModal.classList.add("open");
+    setTimeout(resizeZoneCanvas, 0);
+    setTimeout(resizeZoneCanvas, 150);
+    syncSettingsRoi();
+  }
+
+  function closeSettings() {
+    setModal.classList.remove("open");
+    selectedCameraId = "";
+    setRoiImage.classList.remove("show");
+    zoneCtx.clearRect(0, 0, zoneCanvas.width, zoneCanvas.height);
+  }
+
+  function bindSettingsStatus(status) {
+    if (!status) {
+      stStatus.textContent = "status unavailable";
+      stFps.textContent = "-";
+      stEvent.textContent = "-";
+      stGemini.textContent = "-";
+      stError.textContent = "-";
+      stExplain.textContent = "Cash는 ROI + Global을 결합하고, Fire/Violence는 Global 기반으로 판별합니다.";
+      stRoiCaption.textContent = "-";
+      stGlobalCaption.textContent = "-";
+      return;
+    }
+    stStatus.textContent = `${status.status || "-"} | ${fmtTs(status.server_time)}`;
+    stFps.textContent = `infer ${Number(status.current_fps || 0).toFixed(2)} / stream ${Number(status.stream_fps || 0).toFixed(2)}`;
+    const recent = Array.isArray(status.recent_events) ? status.recent_events : [];
+    const last = recent.length ? recent[recent.length - 1] : null;
+    if (last) {
+      stEvent.textContent = `${last.event_type || last.scenario || "-"} (${Number(last.confidence || 0).toFixed(2)}) @ ${fmtTs(last.at)}`;
+      const gem = last.gemini || {};
+      stGemini.textContent = `${gem.state || "pending"}${typeof gem.confidence === "number" ? ` (${gem.confidence.toFixed(2)})` : ""}`;
+    } else {
+      stEvent.textContent = "-";
+      stGemini.textContent = "-";
+    }
+    stError.textContent = status.last_error || "-";
+
+    const lv = status.last_vlm || {};
+    const results = lv.scenario_results || {};
+    const lines = [];
+    lines.push(`Cash: ROI+Global fusion (zone points: ${Number(status.cashier_zone_points || 0)})`);
+    lines.push("Fire/Violence: Global frame 기반");
+    lines.push(`Tier2 Gemini: uncertainty일 때만 호출 (state=${stGemini.textContent || "-"})`);
+    ["cash", "fire", "violence"].forEach((k) => {
+      const r = results[k];
+      if (!r || typeof r !== "object") return;
+      const det = r.is_detected ? "detected" : "not-detected";
+      const conf = Number(r.confidence || 0).toFixed(2);
+      lines.push(`- ${k}: ${det}, conf=${conf}`);
+    });
+    stExplain.textContent = lines.join("\n");
+
+    const cashRaw = String(((results.cash || {}).raw_response) || lv.cash_caption || "").trim();
+    const globalShared = String(lv.shared_caption || "").trim();
+    let roiCaption = "";
+    let globalCaption = "";
+
+    if (cashRaw.includes("[ROI]") && cashRaw.includes("[GLOBAL]")) {
+      const parts = cashRaw.split("[GLOBAL]");
+      roiCaption = parts[0].replace("[ROI]", "").trim();
+      globalCaption = (parts[1] || "").trim();
+    } else {
+      roiCaption = cashRaw;
+      globalCaption = globalShared;
+    }
+
+    if (!globalCaption) {
+      globalCaption = String(((results.violence || {}).raw_response) || ((results.fire || {}).raw_response) || "").trim();
+    }
+
+    stRoiCaption.textContent = roiCaption || "(ROI caption not available yet)";
+    stGlobalCaption.textContent = globalCaption || "(Global caption not available yet)";
+  }
+
+  function readSettingsConfig() {
+    return normalizeCamera({
+      camera_id: selectedCameraId,
+      rtsp_url: sRtsp.value,
+      base_fps: Number(sBaseFps.value || 1.5),
+      rtsp_transport: sTransport.value,
+      open_timeout_ms: Number(sOpenTimeout.value || 8000),
+      read_timeout_ms: Number(sReadTimeout.value || 8000),
+      event_cooldown_sec: Number(sCooldown.value || 20),
+      clip_duration_sec: Number(sClipSec.value || 10),
+      validation_clip_sec: Number(sValidationSec.value || 10),
+      evidence_mode: sEvidenceMode.value,
+    });
+  }
+
+  function saveSettings(startAfter) {
+    if (!selectedCameraId || !cameras[selectedCameraId]) return;
+    const cfg = readSettingsConfig();
+    if (!validRtsp(cfg.rtsp_url)) return alert("Valid RTSP URL is required.");
+    cameras[selectedCameraId] = cfg;
+    saveStorage();
+    renderGrid();
+    if (startAfter) startCamera(selectedCameraId);
+  }
+
+  function syncSettingsRoi() {
+    if (!setModal.classList.contains("open") || !selectedCameraId) return;
+    if (!sRoiToggle.checked) {
+      setRoiImage.classList.remove("show");
+      return;
+    }
+    const zone = sRoiZone.value || "cashier";
+    setRoiImage.classList.add("show");
+    setRoiImage.src = `/api/vlm/crop/?camera_id=${encodeURIComponent(selectedCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
+  }
+
+  async function toggleFullscreen(el) {
+    try {
+      if (document.fullscreenElement === el || document.webkitFullscreenElement === el) {
+        if (document.exitFullscreen) await document.exitFullscreen();
+        else if (document.webkitExitFullscreen) document.webkitExitFullscreen();
+      } else {
+        if (el.requestFullscreen) await el.requestFullscreen();
+        else if (el.webkitRequestFullscreen) el.webkitRequestFullscreen();
+      }
+    } catch {}
+  }
+
+  function openRoiModal(camId, zone) {
+    roiModalCameraId = camId;
+    roiZone.value = zone || "cashier";
+    roiTitle.textContent = `ROI Only - ${camId}`;
+    roiModal.classList.add("open");
+    refreshRoiModal();
+    if (roiModalTimer) clearInterval(roiModalTimer);
+    roiModalTimer = setInterval(refreshRoiModal, 1200);
+  }
+
+  function refreshRoiModal() {
+    if (!roiModalCameraId) return;
+    const zone = roiZone.value || "cashier";
+    roiMeta.textContent = `${roiModalCameraId} | ${zone} | ${new Date().toLocaleTimeString()}`;
+    roiImage.src = `/api/vlm/crop/?camera_id=${encodeURIComponent(roiModalCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
+  }
+
+  function closeRoiModal() {
+    roiModal.classList.remove("open");
+    roiModalCameraId = "";
+    if (roiModalTimer) {
+      clearInterval(roiModalTimer);
+      roiModalTimer = null;
+    }
+  }
+
+  document.getElementById("btnAddCamera").addEventListener("click", openAddModal);
+  document.getElementById("btnEmptyAdd").addEventListener("click", openAddModal);
+  document.getElementById("btnAddClose").addEventListener("click", closeAddModal);
+  document.getElementById("btnAddSave").addEventListener("click", () => addCamera(false));
+  document.getElementById("btnAddSaveStart").addEventListener("click", () => addCamera(true));
+
+  document.getElementById("btnStartAll").addEventListener("click", startAll);
+  document.getElementById("btnStopAll").addEventListener("click", stopAll);
+
+  document.getElementById("btnSetClose").addEventListener("click", closeSettings);
+  document.getElementById("btnSetSave").addEventListener("click", () => saveSettings(false));
+  document.getElementById("btnSetSaveStart").addEventListener("click", () => saveSettings(true));
+  document.getElementById("btnSetStart").addEventListener("click", () => selectedCameraId && startCamera(selectedCameraId));
+  document.getElementById("btnSetStop").addEventListener("click", () => selectedCameraId && stopCamera(selectedCameraId));
+  document.getElementById("btnSetFull").addEventListener("click", () => toggleFullscreen(setLiveWrap));
+  document.getElementById("btnSetRoiOnly").addEventListener("click", () => selectedCameraId && openRoiModal(selectedCameraId, sRoiZone.value));
+  document.getElementById("btnSetDelete").addEventListener("click", () => {
+    if (!selectedCameraId) return;
+    if (!confirm(`Remove camera ${selectedCameraId}?`)) return;
+    delete cameras[selectedCameraId];
+    delete zoneState[selectedCameraId];
+    delete statusCache[selectedCameraId];
+    saveStorage();
+    saveZoneStorage();
+    closeSettings();
+    renderGrid();
+    updateGlobalStatus();
+  });
+
+  btnZoneCashier.addEventListener("click", () => setZoneMode("cashier"));
+  btnZoneDrawer.addEventListener("click", () => setZoneMode("drawer"));
+  btnZoneUndo.addEventListener("click", undoZonePoint);
+  btnZoneClear.addEventListener("click", clearZonePoints);
+  btnZoneApply.addEventListener("click", applyZonesToServer);
+  zoneCanvas.addEventListener("pointerdown", addZonePoint);
+  zoneCanvas.addEventListener("contextmenu", (e) => e.preventDefault());
+  setLive.addEventListener("load", resizeZoneCanvas);
+  window.addEventListener("resize", () => {
+    if (setModal.classList.contains("open")) resizeZoneCanvas();
+  });
+
+  sRoiToggle.addEventListener("change", syncSettingsRoi);
+  sRoiZone.addEventListener("change", syncSettingsRoi);
+  document.getElementById("btnRoiRefresh").addEventListener("click", syncSettingsRoi);
+
+  document.getElementById("btnRoiClose").addEventListener("click", closeRoiModal);
+  document.getElementById("btnRoiReload").addEventListener("click", refreshRoiModal);
+  roiZone.addEventListener("change", refreshRoiModal);
+
+  camGrid.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (btn && btn.dataset.action === "open") {
+      openSettings(btn.dataset.camera);
+      return;
+    }
+    const card = e.target.closest(".cam-card");
+    if (!card) return;
+    openSettings(card.dataset.camera);
+  });
+
+  addModal.addEventListener("click", (e) => {
+    if (e.target.id === "addModal") closeAddModal();
+  });
+  setModal.addEventListener("click", (e) => {
+    if (e.target.id === "setModal") closeSettings();
+  });
+  roiModal.addEventListener("click", (e) => {
+    if (e.target.id === "roiModal") closeRoiModal();
+  });
+
+  loadStorage();
+  loadZoneStorage();
+  renderGrid();
+  pollStatuses();
+  if (pollTimer) clearInterval(pollTimer);
+  pollTimer = setInterval(pollStatuses, POLL_MS);
+</script>
+{% endblock %}

@@ -1,0 +1,59 @@
+# Secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage*
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Runtime data and local artifacts
+data/
+_tests_archive/
+tmp_*/
+tmp*/
+test_data_tier2/
+*.db
+*.sqlite*
+*.log
+
+# Media outputs
+*.mp4
+*.avi
+*.jpg
+*.jpeg
+*.png
+
+# Model/cache artifacts
+models/
+model_cache/
+*.pt
+*.bin
+*.onnx
+*.ckpt
+*.safetensors
+
+# Local test output noise
+test_out*.txt
+test_*results*.txt
+out*.txt
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

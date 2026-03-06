@@ -1,0 +1,276 @@
+{% extends "vlm_pipeline/base_public.html" %}
+{% block title %}Gemini Logs{% endblock %}
+{% block page_title %}Gemini Logs{% endblock %}
+{% block page_subtitle %}Tier2 validation logs separated from live CCTV view{% endblock %}
+{% block top_actions %}<button id="btnRefresh" class="btn">Refresh</button>{% endblock %}
+
+{% block extra_css %}
+<style>
+  .btn { border:1px solid var(--line); border-radius:9px; padding:8px 12px; background:#fff; color:var(--text); font-size:13px; font-weight:800; cursor:pointer; }
+  .filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:150px; }
+  .field label { font-size:12px; color:var(--sub); font-weight:700; }
+  .field input,.field select { border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:13px; background:#fff; outline:none; }
+  .stats { display:grid; grid-template-columns:repeat(4,minmax(120px,1fr)); gap:10px; margin-bottom:12px; }
+  .stat { border:1px solid var(--line); border-radius:12px; background:#fff; padding:12px; }
+  .stat .k { font-size:12px; color:var(--sub); font-weight:700; margin-bottom:6px; }
+  .stat .v { font-size:26px; font-weight:800; color:#1a2b42; }
+  .stat.ok .v { color:#0f7e4d; }
+  .stat.no .v { color:#b11e47; }
+  .stat.mid .v { color:#8d5a05; }
+  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; max-height:620px; background:#fff; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { position:sticky; top:0; z-index:1; background:#f4f8ff; color:#355070; }
+  .badge { display:inline-flex; align-items:center; border:1px solid transparent; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; }
+  .ok { color:#145c39; border-color:#8cddb4; background:#ddf9eb; }
+  .no { color:#952045; border-color:#f6acbf; background:#ffe8ef; }
+  .mid { color:#7f5600; border-color:#f4cc80; background:#fff3de; }
+  .link { color:#1d67d7; text-decoration:none; font-weight:700; }
+  .reason-btn { border:1px solid #bdd8ff; border-radius:8px; background:#ecf5ff; color:#144e99; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; max-width:260px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; }
+  .muted { color:var(--sub); font-size:12px; }
+  .legend { margin-bottom:10px; border:1px solid var(--line); border-radius:10px; background:#f7fbff; padding:8px 10px; font-size:12px; color:#244464; }
+  .modal { display:none; position:fixed; inset:0; z-index:3000; background:rgba(10,17,31,0.48); align-items:center; justify-content:center; padding:10px; }
+  .modal.open { display:flex; }
+  .modal-card { width:min(760px,96vw); max-height:82vh; overflow:hidden; border-radius:14px; background:#fff; border:1px solid var(--line); box-shadow:0 20px 52px rgba(9,17,31,0.32); }
+  .modal-head { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:14px; font-weight:800; }
+  .modal-body { padding:12px 14px; overflow:auto; max-height:calc(82vh - 56px); }
+  .modal-pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.5; color:#1d314a; }
+  @media (max-width:900px) { .stats { grid-template-columns:repeat(2,minmax(120px,1fr)); } }
+  @media (max-width:560px) { .stats { grid-template-columns:1fr; } .filters { flex-direction:column; } .field { width:100%; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="filters">
+  <div class="field">
+    <label>Camera (exact)</label>
+    <select id="fCameraSel">
+      <option value="">all</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Camera (contains)</label>
+    <input id="fCamera" placeholder="optional keyword" />
+  </div>
+  <div class="field">
+    <label>Scenario</label>
+    <select id="fScenario">
+      <option value="">all</option>
+      <option value="cash">cash</option>
+      <option value="violence">violence</option>
+      <option value="fire">fire</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Decision</label>
+    <select id="fDecision">
+      <option value="">all</option>
+      <option value="accept">accept</option>
+      <option value="decline">decline</option>
+      <option value="skip">skip</option>
+      <option value="pending">pending/error</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Date</label>
+    <select id="fDate">
+      <option value="">realtime(today)</option>
+    </select>
+  </div>
+</div>
+
+<div class="legend">
+  `SKIP` = Gemini 미호출(Tier1에서 불확실성 게이트 통과). 즉, 오탐이 아니라 API 호출 생략 상태입니다.
+</div>
+
+<div class="stats">
+  <div class="stat"><div class="k">Total</div><div id="sTotal" class="v">0</div></div>
+  <div class="stat ok"><div class="k">Accept</div><div id="sAccept" class="v">0</div></div>
+  <div class="stat no"><div class="k">Decline</div><div id="sDecline" class="v">0</div></div>
+  <div class="stat mid"><div class="k">Skip/Pending</div><div id="sSkip" class="v">0</div></div>
+</div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th style="width:148px;">Time</th>
+        <th style="width:92px;">Camera</th>
+        <th style="width:80px;">Scenario</th>
+        <th style="width:92px;">Decision</th>
+        <th style="width:78px;">Conf</th>
+        <th style="width:110px;">Input</th>
+        <th>Reason</th>
+        <th style="width:180px;">Media</th>
+      </tr>
+    </thead>
+    <tbody id="rows">
+      <tr><td colspan="8" class="muted">loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<div id="reasonModal" class="modal" role="dialog" aria-modal="true">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span>Gemini Log Detail</span>
+      <button id="btnCloseModal" class="btn" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <pre id="modalText" class="modal-pre"></pre>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+  const rowsEl = document.getElementById("rows");
+  let allEvents = [];
+
+  const esc = (s) => String(s || "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const fmtTs = (iso) => { try { const d = new Date(iso); return Number.isNaN(d.getTime()) ? (iso || "-") : d.toLocaleString(); } catch { return iso || "-"; } };
+  const shortText = (v, m = 90) => { const s = String(v || "").replace(/\s+/g, " ").trim(); return !s ? "" : (s.length <= m ? s : s.slice(0, m - 1).trimEnd() + "..."); };
+
+  function geminiState(g) {
+    if (!g || typeof g !== "object") return "pending";
+    if (g.state === "skipped") return "skip";
+    if (g.validated === true) return "accept";
+    if (g.validated === false) return "decline";
+    return "pending";
+  }
+
+  function badge(state) {
+    if (state === "accept") return '<span class="badge ok">ACCEPT</span>';
+    if (state === "decline") return '<span class="badge no">DECLINE</span>';
+    if (state === "skip") return '<span class="badge mid">SKIP(T1)</span>';
+    return '<span class="badge mid">PENDING</span>';
+  }
+
+  function parseInputType(g, state) {
+    if (state === "skip") return "tier1_only";
+    const mode = String((g && (g.input_mode || g.validation_type)) || "").toLowerCase();
+    if (!mode) return "-";
+    return mode;
+  }
+
+  async function loadEvents() {
+    const d = document.getElementById("fDate").value;
+    const params = new URLSearchParams({ limit: "400" });
+    if (d) params.set("date", d);
+    const res = await fetch("/api/vlm/events/?" + params.toString());
+    const data = await res.json().catch(() => ({}));
+    allEvents = Array.isArray(data.events) ? data.events : [];
+    bindDateOptions(Array.isArray(data.dates) ? data.dates : []);
+    bindCameraOptions(allEvents);
+    render();
+  }
+
+  function bindDateOptions(dates) {
+    const sel = document.getElementById("fDate");
+    const prev = sel.value;
+    const opts = ['<option value="">realtime(today)</option>'];
+    dates.forEach((d) => opts.push(`<option value="${esc(d)}">${esc(d)}</option>`));
+    sel.innerHTML = opts.join("");
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  }
+
+  function bindCameraOptions(events) {
+    const sel = document.getElementById("fCameraSel");
+    const prev = sel.value;
+    const names = [...new Set(events.map((ev) => String(ev.camera_id || "").trim()).filter(Boolean))].sort();
+    const opts = ['<option value="">all</option>'];
+    names.forEach((name) => opts.push(`<option value="${esc(name)}">${esc(name)}</option>`));
+    sel.innerHTML = opts.join("");
+    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
+  }
+
+  function filteredEvents() {
+    const cameraExact = String(document.getElementById("fCameraSel").value || "").trim().toLowerCase();
+    const cameraContains = String(document.getElementById("fCamera").value || "").trim().toLowerCase();
+    const scenario = String(document.getElementById("fScenario").value || "").trim().toLowerCase();
+    const decision = String(document.getElementById("fDecision").value || "").trim().toLowerCase();
+    return allEvents.filter((ev) => {
+      const g = ev.gemini || {};
+      const state = geminiState(g);
+      const cam = String(ev.camera_id || "").toLowerCase();
+      const sc = String(ev.event_type || ev.scenario || "").toLowerCase();
+      if (cameraExact && cam !== cameraExact) return false;
+      if (cameraContains && !cam.includes(cameraContains)) return false;
+      if (scenario && sc !== scenario) return false;
+      if (decision && state !== decision) return false;
+      return true;
+    });
+  }
+
+  function renderStats(list) {
+    let a = 0, d = 0, s = 0;
+    list.forEach((ev) => {
+      const st = geminiState(ev.gemini || {});
+      if (st === "accept") a += 1;
+      else if (st === "decline") d += 1;
+      else s += 1;
+    });
+    document.getElementById("sTotal").textContent = String(list.length);
+    document.getElementById("sAccept").textContent = String(a);
+    document.getElementById("sDecline").textContent = String(d);
+    document.getElementById("sSkip").textContent = String(s);
+  }
+
+  function openModal(payload) {
+    document.getElementById("modalText").textContent = payload;
+    document.getElementById("reasonModal").classList.add("open");
+  }
+  window.openGeminiDetail = openModal;
+
+  function renderTable(list) {
+    if (!list.length) {
+      rowsEl.innerHTML = '<tr><td colspan="8" class="muted">No gemini logs.</td></tr>';
+      return;
+    }
+    rowsEl.innerHTML = list.map((ev) => {
+      const g = ev.gemini || {};
+      const st = geminiState(g);
+      const reason = String(g.reason || "").trim() || (st === "skip" ? "Tier1 confident enough, Gemini not called." : "");
+      const reasonBtn = reason
+        ? `<button class="reason-btn" type="button" onclick='openGeminiDetail(${JSON.stringify(JSON.stringify({event_id: ev.event_id, at: ev.at, camera_id: ev.camera_id, scenario: ev.event_type || ev.scenario, state: st, confidence: g.confidence, reason: reason, input_mode: g.input_mode, validation_type: g.validation_type, processing_time_ms: g.processing_time_ms, packet_summary: g.packet_summary || null}, null, 2))})'>${esc(shortText(reason, 70))}</button>`
+        : '<span class="muted">-</span>';
+      const media = [
+        ev.clip_url ? `<a class="link" href="${esc(ev.clip_url)}" target="_blank">clip</a>` : "",
+        ev.thumbnail_url ? `<a class="link" href="${esc(ev.thumbnail_url)}" target="_blank">thumb</a>` : "",
+        g.validation_clip_url ? `<a class="link" href="${esc(g.validation_clip_url)}" target="_blank">gemini</a>` : "",
+      ].filter(Boolean).join(" | ") || "-";
+      return `
+        <tr>
+          <td>${esc(fmtTs(ev.at))}</td>
+          <td>${esc(ev.camera_id || "-")}</td>
+          <td>${esc(ev.event_type || ev.scenario || "-")}</td>
+          <td>${badge(st)}</td>
+          <td>${typeof g.confidence === "number" ? g.confidence.toFixed(2) : "-"}</td>
+          <td>${esc(parseInputType(g, st))}</td>
+          <td>${reasonBtn}</td>
+          <td>${media}</td>
+        </tr>`;
+    }).join("");
+  }
+
+  function render() {
+    const list = filteredEvents();
+    renderStats(list);
+    renderTable(list);
+  }
+
+  ["fCameraSel", "fCamera", "fScenario", "fDecision"].forEach((id) => {
+    document.getElementById(id).addEventListener("input", render);
+    document.getElementById(id).addEventListener("change", render);
+  });
+  document.getElementById("fDate").addEventListener("change", loadEvents);
+  document.getElementById("btnRefresh").addEventListener("click", loadEvents);
+  document.getElementById("btnCloseModal").addEventListener("click", () => document.getElementById("reasonModal").classList.remove("open"));
+  document.getElementById("reasonModal").addEventListener("click", (e) => { if (e.target.id === "reasonModal") document.getElementById("reasonModal").classList.remove("open"); });
+
+  loadEvents();
+  setInterval(loadEvents, 6000);
+</script>
+{% endblock %}

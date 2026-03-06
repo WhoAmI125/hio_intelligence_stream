@@ -1,0 +1,1052 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>VLM Shadow Monitor</title>
+﻿
+VLM Shadow Monitor
+<style>
+  :root {
+    --bg: #f2f5fb;
+    --panel: #ffffff;
+    --line: #d9e1ef;
+    --text: #17253a;
+    --muted: #5b6b81;
+    --primary: #1258d4;
+    --ok: #0d8a56;
+    --warn: #b06a00;
+    --bad: #be1f4b;
+  }
+  body {
+    margin: 0;
+    color: var(--text);
+    background: radial-gradient(1200px 420px at 10% -10%, #e8efff, transparent), var(--bg);
+    font-family: "Segoe UI", "Noto Sans KR", sans-serif;
+  }
+  .page {
+    max-width: 1600px;
+    margin: 0 auto;
+    padding: 14px;
+  }
+  .top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    margin-bottom: 10px;
+  }
+  .title h1 {
+    margin: 0;
+    font-size: 22px;
+  }
+  .title p {
+    margin: 7px 0 0;
+    font-size: 13px;
+    color: var(--muted);
+  }
+  .quick-links {
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .link {
+    color: var(--primary);
+    text-decoration: none;
+    font-size: 13px;
+    font-weight: 600;
+  }
+  .summary {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(140px, 1fr));
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .tile {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 10px 12px;
+  }
+  .tile .k {
+    font-size: 12px;
+    color: var(--muted);
+    font-weight: 600;
+    margin-bottom: 6px;
+  }
+  .tile .v {
+    font-size: 20px;
+    font-weight: 700;
+  }
+  .v.ok {
+    color: var(--ok);
+  }
+  .v.warn {
+    color: var(--warn);
+  }
+  .v.bad {
+    color: var(--bad);
+  }
+  .main {
+    display: grid;
+    grid-template-columns: 1fr 380px;
+    gap: 10px;
+  }
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .card .head {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    font-weight: 700;
+    font-size: 14px;
+    color: #1f2f45;
+  }
+  .card .body {
+    padding: 10px 12px;
+  }
+  .logs {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    max-height: 680px;
+    overflow: auto;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  th,
+  td {
+    border-bottom: 1px solid var(--line);
+    padding: 7px 8px;
+    text-align: left;
+    vertical-align: top;
+  }
+  th {
+    position: sticky;
+    top: 0;
+    background: #f3f7ff;
+    color: #334963;
+    z-index: 1;
+  }
+  .pill {
+    display: inline-block;
+    border: 1px solid transparent;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+  }
+  .pill.ok {
+    color: #166534;
+    background: #dcfce7;
+    border-color: #86efac;
+  }
+  .pill.bad {
+    color: #9f1239;
+    background: #ffe4e6;
+    border-color: #fda4af;
+  }
+  .pill.mid {
+    color: #92400e;
+    background: #fef3c7;
+    border-color: #fcd34d;
+  }
+  .btn {
+    border: 1px solid var(--line);
+    background: #fff;
+    border-radius: 8px;
+    padding: 4px 7px;
+    font-size: 11px;
+    cursor: pointer;
+    margin-right: 4px;
+    margin-bottom: 4px;
+    font-weight: 700;
+  }
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .btn.ok {
+    border-color: #86efac;
+    color: #166534;
+    background: #eefcf2;
+  }
+  .btn.bad {
+    border-color: #fda4af;
+    color: #9f1239;
+    background: #fff3f5;
+  }
+  .btn.mid {
+    border-color: #fcd34d;
+    color: #92400e;
+    background: #fff8ea;
+  }
+  .muted {
+    color: var(--muted);
+  }
+  .cues {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .cue {
+    display: inline-block;
+    border: 1px solid #b8caea;
+    background: #f0f6ff;
+    color: #244266;
+    border-radius: 999px;
+    padding: 1px 7px;
+    font-size: 10px;
+    line-height: 1.5;
+    font-weight: 600;
+  }
+  .decision-guide-inline {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(160px, 1fr));
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .decision-card {
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #f8fbff;
+    padding: 8px 10px;
+  }
+  .decision-tag {
+    display: inline-block;
+    border-radius: 999px;
+    padding: 2px 8px;
+    font-size: 11px;
+    font-weight: 700;
+    margin-bottom: 4px;
+    border: 1px solid transparent;
+  }
+  .decision-tag.ok { color: #166534; background: #dcfce7; border-color: #86efac; }
+  .decision-tag.bad { color: #9f1239; background: #ffe4e6; border-color: #fda4af; }
+  .decision-tag.mid { color: #92400e; background: #fef3c7; border-color: #fcd34d; }
+  .decision-title {
+    font-size: 12px;
+    font-weight: 700;
+    color: #2d3f59;
+    margin-bottom: 2px;
+  }
+  .decision-desc {
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.45;
+  }
+  .reason-cell {
+    min-width: 0;
+  }
+  .text-fold {
+    margin: 0;
+  }
+  .text-fold > summary {
+    cursor: pointer;
+    color: #2a3d58;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .text-fold .full {
+    margin-top: 4px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #1d3046;
+  }
+  .status-json {
+    margin: 0;
+    white-space: pre-wrap;
+    word-break: break-word;
+    font-size: 12px;
+    line-height: 1.45;
+    max-height: 250px;
+    overflow: auto;
+  }
+  .guide {
+    margin-top: 10px;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    background: #f7faff;
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+  .guide h3 {
+    margin: 0 0 6px;
+    font-size: 12px;
+    color: #2d3f59;
+  }
+  .guide .guide-row {
+    margin-bottom: 4px;
+  }
+  .guide .guide-row:last-child {
+    margin-bottom: 0;
+  }
+  .modal-guide {
+    margin-bottom: 10px;
+    background: #f7faff;
+  }
+  .modal-wrap {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    background: rgba(8, 14, 24, 0.48);
+    z-index: 9999;
+    padding: 10px;
+  }
+  .modal {
+    width: min(760px, 100%);
+    background: #fff;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    overflow: hidden;
+    box-shadow: 0 22px 48px rgba(8, 18, 38, 0.25);
+  }
+  .modal-head {
+    padding: 10px 12px;
+    border-bottom: 1px solid var(--line);
+    background: #f4f8ff;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .modal-head .title {
+    font-weight: 700;
+    font-size: 14px;
+  }
+  .modal-body {
+    padding: 12px;
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .field.full {
+    grid-column: 1 / -1;
+  }
+  .field label {
+    font-size: 12px;
+    color: #2f445f;
+    font-weight: 700;
+  }
+  .field input,
+  .field select,
+  .field textarea {
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 13px;
+    font-family: inherit;
+    outline: none;
+  }
+  .field input:focus,
+  .field select:focus,
+  .field textarea:focus {
+    border-color: #9dc2ff;
+    box-shadow: 0 0 0 3px rgba(18, 88, 212, 0.12);
+  }
+  .help {
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.35;
+  }
+  .msg {
+    margin-top: 8px;
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-size: 12px;
+    display: none;
+  }
+  .msg.error {
+    color: #8b1235;
+    background: #fff0f3;
+    border: 1px solid #f6c1cd;
+  }
+  .msg.ok {
+    color: #105b3d;
+    background: #ebfaf1;
+    border: 1px solid #9fe2bd;
+  }
+  .modal-foot {
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+  }
+  .btn-main {
+    background: var(--primary);
+    color: #fff;
+    border-color: var(--primary);
+  }
+  @media (max-width: 1200px) {
+    .main {
+      grid-template-columns: 1fr;
+    }
+    .decision-guide-inline {
+      grid-template-columns: repeat(2, minmax(160px, 1fr));
+    }
+  }
+  @media (max-width: 900px) {
+    .summary {
+      grid-template-columns: repeat(2, minmax(140px, 1fr));
+    }
+  }
+  @media (max-width: 620px) {
+    .grid {
+      grid-template-columns: 1fr;
+    }
+    .summary {
+      grid-template-columns: 1fr;
+    }
+    .decision-guide-inline {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="top">
+    <div class="title">
+      <h1>VLM Shadow Monitor</h1>
+      <p>Shadow validation and review panel. Main decision is preserved, shadow is monitored separately.</p>
+    </div>
+    <div class="quick-links">
+      <a class="link" href="/monitor/adhoc">cctv live</a>
+      <span class="muted">|</span>
+      <a class="link" href="/monitor/gemini-logs">gemini logs</a>
+    </div>
+  </div>
+  <div class="summary">
+    <div class="tile">
+      <div class="k">Shadow Enabled</div>
+      <div class="v" id="sumEnabled">-</div>
+    </div>
+    <div class="tile">
+      <div class="k">Queue Size</div>
+      <div class="v" id="sumQueue">-</div>
+    </div>
+    <div class="tile">
+      <div class="k">Prompt Version</div>
+      <div class="v" id="sumPrompt">-</div>
+    </div>
+    <div class="tile">
+      <div class="k">Last Error</div>
+      <div class="v" id="sumError">-</div>
+    </div>
+  </div>
+  <div class="main">
+    <div class="card">
+      <div class="head">Shadow Decisions</div>
+      <div class="body">
+        <div class="decision-guide-inline">
+          <div class="decision-card">
+            <span class="decision-tag ok">ACCEPT</span>
+            <div class="decision-title">현재 판정 유지</div>
+            <div class="decision-desc">이벤트 판단이 맞으면 선택합니다.</div>
+          </div>
+          <div class="decision-card">
+            <span class="decision-tag bad">DECLINE</span>
+            <div class="decision-title">오탐/오분류</div>
+            <div class="decision-desc">판정이 틀리거나 라벨이 잘못되면 선택합니다.</div>
+          </div>
+          <div class="decision-card">
+            <span class="decision-tag mid">NOT_DECIDE</span>
+            <div class="decision-title">판단 보류</div>
+            <div class="decision-desc">증거가 부족해 확정하기 어려우면 선택합니다.</div>
+          </div>
+        </div>
+        <div class="logs">
+          <table>
+            <thead>
+              <tr>
+                <th style="width: 152px;">Time</th>
+                <th style="width: 132px;">Event ID</th>
+                <th style="width: 74px;">Type</th>
+                <th style="width: 98px;">Main</th>
+                <th style="width: 120px;">Shadow Class</th>
+                <th style="width: 74px;">Valid</th>
+                <th style="width: 74px;">Conf</th>
+                <th>Reason</th>
+                <th style="width: 220px;">Detected Cues</th>
+                <th style="width: 104px;">Clip</th>
+                <th style="width: 194px;">Feedback</th>
+              </tr>
+            </thead>
+            <tbody id="shadowRows">
+              <tr>
+                <td colspan="11" class="muted">loading...</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+    <div class="card">
+      <div class="head">Shadow Status and Review Guide</div>
+      <div class="body">
+        <pre id="shadowStatus" class="status-json">loading...</pre>
+        <div class="guide">
+          <h3>How to review</h3>
+          <div class="guide-row">1. <b>Accept</b>: Main decision is good. No popup is required.</div>
+          <div class="guide-row">2. <b>Decline</b>: Main decision is wrong. Fill popup details for error analysis.</div>
+          <div class="guide-row">3. <b>NotDecide (unsure)</b>: Evidence is weak or ambiguous. Fill popup details for follow-up.</div>
+          <div class="guide-row">4. <b>Edit/Override</b>: If feedback was wrong, click Edit/Override in the row and resubmit.</div>
+        </div>
+        <div class="guide">
+          <h3>Decline/NotDecide popup fields</h3>
+          <div class="guide-row"><b>Note</b>: What was wrong/unclear in this event. Add factual observations first.</div>
+          <div class="guide-row"><b>Error Type</b>: Pick root cause (`false_positive`, `false_negative`, `wrong_class`, `weak_reason`, `other`).</div>
+          <div class="guide-row"><b>Missed Focus</b>: Comma-separated cues the model missed (max 12). Use the "Detected Cues" column as reference.</div>
+          <div class="guide-row"><b>Suggestion</b>: Optional prompt/policy improvement idea for next refine cycle.</div>
+        </div>
+        <div class="msg" id="pageMsg"></div>
+      </div>
+    </div>
+  </div>
+</div>
+<div class="modal-wrap" id="feedbackModalWrap" role="dialog" aria-modal="true" aria-labelledby="feedbackModalTitle">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="title" id="feedbackModalTitle">Feedback</div>
+      <button class="btn" type="button" id="btnModalClose">close</button>
+    </div>
+    <div class="modal-body">
+      <div class="msg error" id="modalError"></div>
+      <div class="guide modal-guide">
+        <h3>How to fill this popup</h3>
+        <div class="guide-row" id="modalDecisionGuide">Decline/NotDecide(unsure) feedback is used to improve shadow prompts. Be concrete and factual.</div>
+        <div class="guide-row"><b>Decline 입력 순서</b>: 1) Note 2) Error Type 3) Missed Focus 4) Suggestion(선택)</div>
+        <div class="guide-row">Recommended minimum for <b>decline</b>: Note + Error Type.</div>
+        <div class="guide-row">Recommended minimum for <b>not_decide</b>: Note + Missed Focus.</div>
+        <div class="guide-row">Note template: <code>[관찰 사실] + [오판 이유] + [기대 라벨]</code></div>
+        <div class="guide-row">Example: <code>영수증 교환만 보이고 지폐 패턴이 없어 CASH_TRANSACTION 아님</code></div>
+      </div>
+      <div class="grid">
+        <div class="field">
+          <label for="fbDecision">Decision</label>
+          <select id="fbDecision">
+            <option value="accept">accept</option>
+            <option value="decline">decline</option>
+            <option value="unsure">not_decide (unsure)</option>
+          </select>
+          <div class="help" id="fbDecisionHelp">Select action for this event. In override mode this will replace previous shadow feedback.</div>
+        </div>
+        <div class="field">
+          <label>Event ID</label>
+          <input type="text" id="fbEventId" readonly />
+          <div class="help">Unique event key used by feedback API.</div>
+        </div>
+        <div class="field full">
+          <label>Detected Cues (reference)</label>
+          <input type="text" id="fbDetectedCues" readonly />
+          <div class="help">These are cues extracted by Tier1/Fallback summary. Add missing expected cues to Missed Focus.</div>
+        </div>
+        <div class="field full">
+          <label for="fbNote">Note</label>
+          <textarea id="fbNote" rows="3" placeholder="Describe why this should be declined or marked not_decide."></textarea>
+          <div class="help" id="fbNoteHelp">What was wrong or uncertain in this decision.</div>
+        </div>
+        <div class="field">
+          <label for="fbErrorType">Error Type</label>
+          <select id="fbErrorType">
+            <option value="false_positive">false_positive</option>
+            <option value="false_negative">false_negative</option>
+            <option value="wrong_class">wrong_class</option>
+            <option value="weak_reason">weak_reason</option>
+            <option value="other">other</option>
+          </select>
+          <div class="help" id="fbErrorTypeHelp">Category for analytics and downstream model tuning.</div>
+        </div>
+        <div class="field">
+          <label for="fbMissedFocus">Missed Focus (comma-separated)</label>
+          <input id="fbMissedFocus" type="text" placeholder="cashier_hand, drawer_open, occlusion" />
+          <div class="help" id="fbMissedFocusHelp">Max 12 items. Example: cashier_hand, drawer_open.</div>
+        </div>
+        <div class="field full">
+          <label for="fbSuggestion">Suggestion</label>
+          <textarea id="fbSuggestion" rows="2" placeholder="How should the prompt or evidence policy be improved?"></textarea>
+          <div class="help" id="fbSuggestionHelp">Optional improvement idea for prompt, routing, or evidence policy.</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" type="button" id="btnModalCancel">cancel</button>
+      <button class="btn btn-main" type="button" id="btnModalSubmit">submit</button>
+    </div>
+  </div>
+</div>
+<script>
+  const ALLOWED_ERROR_TYPES = new Set([
+    "false_positive",
+    "false_negative",
+    "wrong_class",
+    "weak_reason",
+    "other",
+    "",
+  ]);
+  const state = {
+    modalOpen: false,
+    submitPending: false,
+    recentEventById: {},
+    feedback: {
+      eventId: "",
+      override: false,
+    },
+  };
+  function esc(s) {
+    return String(s || "").replace(/[&<>\"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;" }[c]));
+  }
+  function fmtTs(iso) {
+    if (!iso) return "-";
+    try {
+      const d = new Date(iso);
+      if (Number.isNaN(d.getTime())) return String(iso);
+      return d.toLocaleString();
+    } catch (_e) {
+      return String(iso);
+    }
+  }
+  function pill(valid) {
+    if (valid === true) return '<span class="pill ok">TRUE</span>';
+    if (valid === false) return '<span class="pill bad">FALSE</span>';
+    return '<span class="pill mid">-</span>';
+  }
+  function normalizeDecision(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw === "true") return "accept";
+    if (raw === "false") return "decline";
+    if (raw === "accept" || raw === "decline" || raw === "unsure") return raw;
+    return "";
+  }
+  function decisionLabel(value) {
+    const d = normalizeDecision(value);
+    if (d === "accept") return "Accept";
+    if (d === "decline") return "Decline";
+    if (d === "unsure") return "NotDecide";
+    return "-";
+  }
+  function normalizeLineText(value) {
+    return String(value || "").replace(/\s+/g, " ").trim();
+  }
+  function shortText(value, maxLen = 120) {
+    const src = normalizeLineText(value);
+    if (!src) return "";
+    if (src.length <= maxLen) return src;
+    return src.slice(0, Math.max(1, maxLen - 1)).trimEnd() + "…";
+  }
+  function renderFoldText(value, maxLen = 120, emptyText = "-") {
+    const src = normalizeLineText(value);
+    if (!src) return `<span class="muted">${esc(emptyText)}</span>`;
+    if (src.length <= maxLen) return `<div>${esc(src)}</div>`;
+    return `<details class="text-fold"><summary>${esc(shortText(src, maxLen))}</summary><div class="full">${esc(src)}</div></details>`;
+  }
+  function renderOptionalFoldText(value, maxLen = 90) {
+    const src = normalizeLineText(value);
+    if (!src) return "";
+    if (src.length <= maxLen) return `<div class="muted">${esc(src)}</div>`;
+    return `<details class="text-fold muted"><summary>${esc(shortText(src, maxLen))}</summary><div class="full">${esc(src)}</div></details>`;
+  }
+  function feedbackFromEvent(eventCtx) {
+    if (!eventCtx || typeof eventCtx !== "object") return null;
+    const sf = (eventCtx.shadow_feedback && typeof eventCtx.shadow_feedback === "object") ? eventCtx.shadow_feedback : null;
+    if (!sf) return null;
+    const decision = normalizeDecision(sf.decision);
+    if (!decision) return null;
+    return {
+      decision: decision,
+      at: String(sf.at || ""),
+      note: String(sf.note || ""),
+      error_type: String(sf.error_type || ""),
+      missed_focus: Array.isArray(sf.missed_focus) ? sf.missed_focus : [],
+      suggestion: String(sf.suggestion || ""),
+    };
+  }
+  function updateDecisionGuide() {
+    const decision = normalizeDecision(document.getElementById("fbDecision").value);
+    const decisionGuide = document.getElementById("modalDecisionGuide");
+    const decisionHelp = document.getElementById("fbDecisionHelp");
+    const noteEl = document.getElementById("fbNote");
+    const noteHelp = document.getElementById("fbNoteHelp");
+    const errorTypeHelp = document.getElementById("fbErrorTypeHelp");
+    const missedFocusHelp = document.getElementById("fbMissedFocusHelp");
+    const suggestionHelp = document.getElementById("fbSuggestionHelp");
+    const prefix = state.feedback.override ? "Override mode. " : "";
+    if (decision === "decline") {
+      decisionGuide.textContent = prefix + "Decline means the main decision is wrong. Write concrete facts and root cause.";
+      decisionHelp.textContent = "Decline feedback is used for false-alarm/root-cause analysis.";
+      noteEl.placeholder = "Example: 영수증 교환만 보이고 지폐 패턴이 없어 CASH_TRANSACTION 아님.";
+      noteHelp.textContent = "권장 형식: [관찰 사실] + [왜 틀렸는지] + [기대 라벨]. 최소 1문장 이상 구체적으로 작성.";
+      errorTypeHelp.textContent = "false_positive(오탐), wrong_class(라벨오류), weak_reason(근거약함), false_negative(누락), other.";
+      missedFocusHelp.textContent = "쉼표로 2~5개 권장. 예: receipt_only, no_cash_pattern, no_staff_possession (최대 12개).";
+      suggestionHelp.textContent = "선택 항목. 다음부터 오탐을 줄일 규칙/프롬프트 개선안을 한 줄로 작성.";
+    } else if (decision === "unsure") {
+      decisionGuide.textContent = prefix + "NotDecide (unsure) means evidence is ambiguous. Explain what is missing.";
+      decisionHelp.textContent = "NotDecide feedback is used for follow-up review and prompt refinement.";
+      noteEl.placeholder = "Example: Hands are occluded. Need clearer frame around drawer interaction.";
+      noteHelp.textContent = "불확실 이유를 작성: 가림/저화질/짧은 구간 등으로 확정이 어려운 근거를 적어주세요.";
+      errorTypeHelp.textContent = "필요 시 선택. unsure는 error_type 없이도 저장 가능하지만 원인 분류를 넣으면 분석에 도움이 됩니다.";
+      missedFocusHelp.textContent = "확정에 필요했던 단서를 작성. 예: object_identity, post_transfer_staff_possession.";
+      suggestionHelp.textContent = "선택 항목. 어떤 추가 프레임/규칙이 있으면 확정 가능했는지 적어주세요.";
+    } else {
+      decisionGuide.textContent = prefix + "Accept means the main decision is correct.";
+      decisionHelp.textContent = "Accept feedback marks this event as correct under shadow review.";
+      noteEl.placeholder = "Optional note.";
+      noteHelp.textContent = "선택 항목. 맞다고 본 이유를 짧게 남길 수 있습니다.";
+      errorTypeHelp.textContent = "accept에서는 보통 비워둡니다.";
+      missedFocusHelp.textContent = "accept에서는 보통 비워둡니다.";
+      suggestionHelp.textContent = "선택 항목. 현재 규칙이 잘 동작한 포인트를 남길 수 있습니다.";
+    }
+  }
+  function safeArr(v) {
+    return Array.isArray(v) ? v : [];
+  }
+  function cueListFromEvent(eventCtx) {
+    if (!eventCtx || typeof eventCtx !== "object") return [];
+    const gem = (eventCtx.gemini && typeof eventCtx.gemini === "object") ? eventCtx.gemini : {};
+    const packet = (gem.packet_summary && typeof gem.packet_summary === "object") ? gem.packet_summary : {};
+    const sig = (packet.florence_signals && typeof packet.florence_signals === "object") ? packet.florence_signals : {};
+    const out = [];
+    const seen = new Set();
+    [
+      ...safeArr(sig.matched_keywords),
+      ...safeArr(sig.object_hints),
+      ...safeArr(sig.exclusion_match),
+      ...safeArr(sig.global_keywords),
+    ].forEach((x) => {
+      const s = String(x || "").trim();
+      if (!s) return;
+      if (seen.has(s)) return;
+      seen.add(s);
+      out.push(s);
+    });
+    return out.slice(0, 12);
+  }
+  function cueBadges(cues) {
+    if (!Array.isArray(cues) || cues.length === 0) return '<span class="muted">-</span>';
+    return `<div class="cues">${cues.slice(0, 8).map((c) => `<span class="cue">${esc(c)}</span>`).join("")}</div>`;
+  }
+  function setPageMsg(message, type) {
+    const el = document.getElementById("pageMsg");
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      el.className = "msg";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = String(message);
+    el.className = "msg " + (type || "ok");
+  }
+  function setModalError(message) {
+    const el = document.getElementById("modalError");
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = String(message);
+  }
+  function setSubmitState(isPending) {
+    state.submitPending = Boolean(isPending);
+    const submit = document.getElementById("btnModalSubmit");
+    const cancel = document.getElementById("btnModalCancel");
+    const close = document.getElementById("btnModalClose");
+    submit.disabled = isPending;
+    cancel.disabled = isPending;
+    close.disabled = isPending;
+    submit.textContent = isPending ? "submitting..." : "submit";
+  }
+  function normalizeMissedFocus(raw) {
+    const src = String(raw || "");
+    const out = [];
+    const seen = new Set();
+    src.split(",").forEach((chunk) => {
+      const item = String(chunk || "").trim();
+      if (!item) return;
+      const cut = item.slice(0, 64);
+      if (seen.has(cut)) return;
+      seen.add(cut);
+      out.push(cut);
+    });
+    return out.slice(0, 12);
+  }
+  async function postJson(url, body) {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+    });
+    let data = {};
+    try {
+      data = await res.json();
+    } catch (_e) {}
+    return { res, data };
+  }
+  function openFeedbackModal(eventId, decision, options = {}) {
+    const eid = String(eventId || "").trim();
+    const dc = String(decision || "").trim().toLowerCase();
+    const override = Boolean(options && options.override);
+    const prefill = (options && options.prefill && typeof options.prefill === "object") ? options.prefill : null;
+    if (!eid) {
+      setPageMsg("Feedback failed: event_id is empty.", "error");
+      return;
+    }
+    state.feedback.eventId = eid;
+    state.feedback.override = override;
+    const eventCtx = state.recentEventById[eid] || null;
+    const cues = cueListFromEvent(eventCtx);
+    document.getElementById("fbEventId").value = eid;
+    document.getElementById("fbDecision").value = dc;
+    document.getElementById("fbDetectedCues").value = cues.length ? cues.join(", ") : "(none)";
+    if (prefill) {
+      document.getElementById("fbNote").value = prefill.note || "";
+      document.getElementById("fbErrorType").value = ALLOWED_ERROR_TYPES.has(prefill.error_type || "") ? String(prefill.error_type || "") : "other";
+      document.getElementById("fbMissedFocus").value = Array.isArray(prefill.missed_focus) ? prefill.missed_focus.join(", ") : "";
+      document.getElementById("fbSuggestion").value = prefill.suggestion || "";
+    } else {
+      document.getElementById("fbNote").value = "";
+      document.getElementById("fbErrorType").value = "false_positive";
+      document.getElementById("fbMissedFocus").value = "";
+      document.getElementById("fbSuggestion").value = "";
+    }
+    updateDecisionGuide();
+    setModalError("");
+    setSubmitState(false);
+    document.getElementById("feedbackModalWrap").style.display = "flex";
+    state.modalOpen = true;
+  }
+  function closeFeedbackModal() {
+    if (state.submitPending) return;
+    document.getElementById("feedbackModalWrap").style.display = "none";
+    state.modalOpen = false;
+    setModalError("");
+  }
+  function getModalPayload() {
+    const eventId = String(state.feedback.eventId || "").trim();
+    const decision = normalizeDecision(document.getElementById("fbDecision").value);
+    const note = String(document.getElementById("fbNote").value || "").trim();
+    const errorTypeRaw = String(document.getElementById("fbErrorType").value || "").trim().toLowerCase();
+    const errorType = ALLOWED_ERROR_TYPES.has(errorTypeRaw) ? errorTypeRaw : "other";
+    const missedFocus = normalizeMissedFocus(document.getElementById("fbMissedFocus").value || "");
+    const suggestion = String(document.getElementById("fbSuggestion").value || "").trim().slice(0, 400);
+    return {
+      event_id: eventId,
+      decision: decision,
+      note: note,
+      error_type: errorType,
+      missed_focus: missedFocus,
+      suggestion: suggestion,
+      override: Boolean(state.feedback.override),
+    };
+  }
+  async function submitFeedback(payload) {
+    if (!payload.event_id) {
+      setModalError("event_id is required.");
+      return false;
+    }
+    if (!["accept", "decline", "unsure"].includes(payload.decision)) {
+      setModalError("decision must be accept, decline, or unsure.");
+      return false;
+    }
+    if (!ALLOWED_ERROR_TYPES.has(payload.error_type || "")) {
+      payload.error_type = "other";
+    }
+    if (Array.isArray(payload.missed_focus)) {
+      payload.missed_focus = payload.missed_focus.slice(0, 12);
+    } else {
+      payload.missed_focus = [];
+    }
+    try {
+      setSubmitState(true);
+      const { res, data } = await postJson("/api/vlm/shadow/feedback/", payload);
+      if (!res.ok || !data.success) {
+        setModalError("Feedback submit failed: " + (data.error || res.status));
+        return false;
+      }
+      setPageMsg("Feedback saved: " + payload.decision.toUpperCase(), "ok");
+      return true;
+    } catch (err) {
+      setModalError("Feedback submit failed: " + String(err));
+      return false;
+    } finally {
+      setSubmitState(false);
+    }
+  }
+  async function sendFeedback(eventId, decision) {
+    const eid = String(eventId || "").trim();
+    const dc = String(decision || "").trim().toLowerCase();
+    if (!eid) {
+      setPageMsg("Feedback failed: event_id is empty.", "error");
+      return;
+    }
+    const reviewed = feedbackFromEvent(state.recentEventById[eid] || null);
+    if (reviewed) {
+      setPageMsg("This event already has shadow feedback. Use Edit/Override to change it.", "ok");
+      return;
+    }
+    if (dc === "accept") {
+      const ok = await submitFeedback({
+        event_id: eid,
+        decision: "accept",
+        note: "",
+        error_type: "",
+        missed_focus: [],
+        suggestion: "",
+        override: false,
+      });
+      if (ok) await poll();
+      return;
+    }
+    openFeedbackModal(eid, dc, { override: false });
+  }
+  window.sendFeedback = sendFeedback;
+  function editShadowFeedback(eventId) {
+    const eid = String(eventId || "").trim();
+    if (!eid) {
+      setPageMsg("Override failed: event_id is empty.", "error");
+      return;
+    }
+    const eventCtx = state.recentEventById[eid] || null;
+    const reviewed = feedbackFromEvent(eventCtx);
+    if (!reviewed) {
+      setPageMsg("No existing shadow feedback found for override.", "error");
+      return;
+    }
+    openFeedbackModal(eid, reviewed.decision, { override: true, prefill: reviewed });
+  }
+  window.editShadowFeedback = editShadowFeedback;
+  async function onModalSubmit() {
+    const payload = getModalPayload();
+    const ok = await submitFeedback(payload);
+    if (!ok) return;
+    closeFeedbackModal();
+    await poll();
+  }
+  function renderRows(rows) {
+    const tbody = document.getElementById("shadowRows");
+    if (!Array.isArray(rows) || rows.length === 0) {
+      tbody.innerHTML = '<tr><td colspan="11" class="muted">No shadow decisions yet.</td></tr>';
+      return;
+    }
+    tbody.innerHTML = rows.map((row) => {
+      const main = (row.main_gemini && typeof row.main_gemini === "object") ? row.main_gemini : {};
+      const shadow = (row.shadow_result && typeof row.shadow_result === "object") ? row.shadow_result : {};
+      const clip = main.validation_clip_url
+        ? `<a class="link" href="${esc(main.validation_clip_url)}" target="_blank" rel="noopener">validation clip</a>`
+        : "-";
+      const eventId = String(row.event_id || "");
+      const eventCtx = state.recentEventById[eventId] || null;
+      const cues = cueListFromEvent(eventCtx);
+      const reviewed = feedbackFromEvent(eventCtx);
+      const reviewedCls = reviewed
+        ? (reviewed.decision === "accept" ? "ok" : (reviewed.decision === "decline" ? "bad" : "mid"))
+        : "mid";
+      const reviewedAt = reviewed && reviewed.at ? esc(fmtTs(reviewed.at)) : "-";
+      const reviewedNote = reviewed ? renderOptionalFoldText(reviewed.note || "", 80) : "";
+      const feedbackButtons = reviewed
+        ? `
+            <div><span class="pill ${reviewedCls}">reviewed: ${esc(decisionLabel(reviewed.decision))}</span></div>
+            <div class="muted" style="margin:4px 0 6px;">${reviewedAt}</div>
+            ${reviewedNote ? `<div style="margin-bottom:6px;">${reviewedNote}</div>` : ""}
+            <button class="btn mid" type="button" onclick="editShadowFeedback('${esc(eventId)}')">edit/override</button>
+          `
+        : `
+            <button class="btn ok" type="button" title="현재 판정이 맞음" onclick="sendFeedback('${esc(eventId)}','accept')">accept</button>
+            <button class="btn bad" type="button" title="현재 판정이 틀림" onclick="sendFeedback('${esc(eventId)}','decline')">decline</button>
+            <button class="btn mid" type="button" title="판단 보류(근거 부족)" onclick="sendFeedback('${esc(eventId)}','unsure')">notDecide</button>
+          `;
+      return `
+        <tr>
+          <td>${esc(fmtTs(row.ts))}</td>
+          <td>${esc(eventId || "-")}</td>
+          <td>${esc(row.event_type || "-")}</td>
+          <td>${pill(main.validated)} ${typeof main.confidence === "number" ? `(${main.confidence.toFixed(2)})` : ""}</td>
+          <td>${esc(shadow.shadow_class || "-")}</td>
+          <td>${pill(shadow.is_valid)}</td>
+          <td>${typeof shadow.confidence === "number" ? shadow.confidence.toFixed(2) : "-"}</td>
+          <td><div class="reason-cell">${renderFoldText(shadow.reason || "", 120, "-")}</div></td>
+          <td>${cueBadges(cues)}</td>
+          <td>${clip}</td>
+          <td>${feedbackButtons}</td>
+        </tr>
+      `;
+    }).join("");
+  }
+  function updateSummary(shadow) {
+    const enabled = Boolean(shadow.enabled);
+    const queueSize = shadow.queue_size;
+    const promptVersion = shadow.last_prompt_version || "-";
+    const lastError = shadow.last_error || "-";
+    const enabledEl = document.getElementById("sumEnabled");
+    enabledEl.textContent = enabled ? "ON" : "OFF";
+    enabledEl.className = "v " + (enabled ? "ok" : "warn");
+    document.getElementById("sumQueue").textContent = (typeof queueSize === "number") ? String(queueSize) : "-";
+    document.getElementById("sumPrompt").textContent = String(promptVersion);
+    const errEl = document.getElementById("sumError");
+    errEl.textContent = String(lastError);
+    errEl.className = "v " + ((lastError && lastError !== "-") ? "bad" : "ok");
+  }
+  async function poll() {
+    try {
+      const [stRes, rwRes] = await Promise.all([
+        fetch("/api/vlm/status/"),
+        fetch("/api/vlm/shadow/recent/?limit=120"),
+      ]);
+      let st = {};
+      let rw = {};
+      try { st = await stRes.json(); } catch (_e) {}
+      try { rw = await rwRes.json(); } catch (_e) {}
+      const recent = Array.isArray(st.recent_events) ? st.recent_events : [];
+      const byId = {};
+      recent.forEach((ev) => {
+        const id = String((ev && ev.event_id) || "").trim();
+        if (!id) return;
+        byId[id] = ev;
+      });
+      state.recentEventById = byId;
+      const shadow = (st.shadow && typeof st.shadow === "object") ? st.shadow : {};
+      document.getElementById("shadowStatus").textContent = JSON.stringify(shadow, null, 2);
+      updateSummary(shadow);
+      renderRows(Array.isArray(rw.rows) ? rw.rows : []);
+    } catch (err) {
+      setPageMsg("Polling error: " + String(err), "error");
+    }
+  }
+  document.getElementById("btnModalClose").addEventListener("click", closeFeedbackModal);
+  document.getElementById("btnModalCancel").addEventListener("click", closeFeedbackModal);
+  document.getElementById("btnModalSubmit").addEventListener("click", onModalSubmit);
+  document.getElementById("fbDecision").addEventListener("change", updateDecisionGuide);
+  document.getElementById("feedbackModalWrap").addEventListener("click", (ev) => {
+    if (ev.target && ev.target.id === "feedbackModalWrap") {
+      closeFeedbackModal();
+    }
+  });
+  window.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && state.modalOpen) {
+      closeFeedbackModal();
+    }
+  });
+  setInterval(poll, 2500);
+  poll();
+</script>
+</body>
+</html>
