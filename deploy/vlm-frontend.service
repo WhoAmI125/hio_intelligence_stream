@@ -6,11 +6,11 @@ After=network.target vlm-model.service vlm-db.service
 Type=simple
 User=vlmapp
 Group=vlmapp
-WorkingDirectory=/home/ubuntu/vlm_new_deploy
-Environment=PYTHONPATH=/home/ubuntu/vlm_new_deploy
-EnvironmentFile=/home/ubuntu/vlm_new_deploy/.env
+WorkingDirectory=/home/ubuntu/hio_intelligence_stream
+Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
 
-ExecStart=/home/ubuntu/vlm_new_deploy/venv/bin/uvicorn \
+ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
     frontend_server.main:app \
     --host 127.0.0.1 \
     --port 8002 \

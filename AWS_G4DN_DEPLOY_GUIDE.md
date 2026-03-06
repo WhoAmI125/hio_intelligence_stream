@@ -1,7 +1,7 @@
 # AWS g4dn 배포 가이드
 
 Last Updated: 2026-03-06
-Target: Ubuntu 24.04 LTS, g4dn.xlarge (Tesla T4), `/home/ubuntu/vlm_new_deploy`
+Target: Ubuntu 24.04 LTS, g4dn.xlarge (Tesla T4), `/home/ubuntu/hio_intelligence_stream`
 
 ---
 
@@ -15,7 +15,7 @@ Target: Ubuntu 24.04 LTS, g4dn.xlarge (Tesla T4), `/home/ubuntu/vlm_new_deploy`
 nginx (80/443)
   │
   └── frontend_server (:8002, uvicorn)
-        ├── Jinja2 UI (/monitor/adhoc, /monitor/shadow, /monitor/gemini-logs)
+        ├── Jinja2 UI (/monitor/adhoc, /monitor/shadow, /monitor/validation-logs)
         ├── /api/vlm/* → proxy → model_server (:8000)
         └── /api/*     → proxy → db_server (:8001)
 
@@ -149,8 +149,8 @@ dkms status
 cd /home/ubuntu
 
 # Git 클론 (또는 scp 업로드)
-git clone https://github.com/YOUR_REPO/vlm_new_deploy.git
-cd vlm_new_deploy
+git clone https://github.com/YOUR_REPO/hio_intelligence_stream.git
+cd hio_intelligence_stream
 
 # venv 생성
 python3 -m venv venv
@@ -171,15 +171,18 @@ df -h /   # 여유 공간 확인 (최소 3GB 이상 필요)
 ### 6단계: setup 스크립트 실행
 
 ```bash
-cd /home/ubuntu/vlm_new_deploy
+cd /home/ubuntu/hio_intelligence_stream
 sudo bash deploy/setup_aws_g4dn.sh
 ```
+
+> 저디스크 안전 모드 기본값: `SKIP_MODEL_PRELOAD=1` (Florence 사전 다운로드 스킵).
+> 사전 다운로드가 필요하면 `sudo SKIP_MODEL_PRELOAD=0 bash deploy/setup_aws_g4dn.sh` 사용.
 
 스크립트가 하는 일:
 1. 시스템 패키지 설치 (nginx, ffmpeg, certbot 등)
 2. `vlmapp` 서비스 계정 생성
 3. 남은 Python 의존성 설치 (`requirements.txt`)
-4. Florence-2 모델 캐시 다운로드
+4. Florence-2 모델 캐시 다운로드 (저디스크 모드에서는 기본 스킵)
 5. 런타임 디렉토리 생성 (data/, logs/, clips/ 등)
 6. `.env.aws` → `.env` 복사 (없을 때만)
 7. 권한 설정
@@ -190,7 +193,7 @@ sudo bash deploy/setup_aws_g4dn.sh
 ### 7단계: 환경 변수 설정
 
 ```bash
-nano /home/ubuntu/vlm_new_deploy/.env
+nano /home/ubuntu/hio_intelligence_stream/.env
 # GEMINI_API_KEY=실제_API_키_입력
 ```
 
@@ -209,7 +212,7 @@ sudo systemctl restart vlm-model vlm-db vlm-frontend
 nvidia-smi
 
 # Python에서 직접 확인
-source /home/ubuntu/vlm_new_deploy/venv/bin/activate
+source /home/ubuntu/hio_intelligence_stream/venv/bin/activate
 python -c "import torch; print('CUDA:', torch.cuda.is_available(), '/', torch.cuda.get_device_name(0))"
 # CUDA: True / Tesla T4 가 나와야 함
 ```
@@ -381,7 +384,7 @@ sudo certbot renew
 ## 파일 구조 (deploy/)
 
 ```
-vlm_new_deploy/
+hio_intelligence_stream/
 ├── deploy/
 │   ├── setup_aws_g4dn.sh       # 원스탑 배포 스크립트
 │   ├── nginx.conf               # nginx 리버스 프록시

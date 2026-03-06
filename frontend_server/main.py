@@ -7,6 +7,7 @@ Endpoints:
     GET /                    → redirect to /monitor/adhoc
     GET /monitor/adhoc       → real-time CCTV monitoring UI
     GET /monitor/shadow      → shadow agent review UI
+    GET /api/proxy/cameras   → proxy to db_server for camera configs
     GET /api/proxy/events    → proxy to db_server for event list
     GET /api/proxy/stats     → proxy to db_server for stats
     GET /api/proxy/status    → proxy to model_server for status
@@ -16,6 +17,7 @@ import logging
 import os
 import sys
 import json
+import subprocess
 from contextlib import asynccontextmanager
 from urllib.parse import urlparse
 
@@ -25,6 +27,11 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse, StreamingResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+
+try:
+    import psutil
+except Exception:
+    psutil = None
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -211,16 +218,18 @@ async def dashboard():
             <h2>Recent Events</h2>
             <div class="loading">Loading...</div>
         </div>
+        <div class="card" id="system-card">
+            <h2>System</h2>
+            <div class="loading">Loading...</div>
+        </div>
     </div>
     <script>
-        const MODEL = '""" + MODEL_SERVER_URL + """';
-        const DB = '""" + DB_SERVER_URL + """';
-
         async function loadAll() {
             // Model Server status
             try {
-                const r = await fetch(MODEL + '/status');
+                const r = await fetch('/api/proxy/status');
                 const d = await r.json();
+                if (d.error) throw new Error(d.error);
                 const streams = Object.keys(d.streams || {});
                 const agents = (d.agents_loaded || []).join(', ');
                 document.getElementById('model-card').innerHTML = `
@@ -236,8 +245,9 @@ async def dashboard():
 
             // DB Server stats
             try {
-                const r = await fetch(DB + '/api/stats');
+                const r = await fetch('/api/proxy/stats');
                 const d = await r.json();
+                if (d.error) throw new Error(d.error);
                 document.getElementById('db-card').innerHTML = `
                     <h2>DB Server</h2>
                     <div class="stat"><span class="label">Total Events</span><span class="value">${d.total_events}</span></div>
@@ -252,14 +262,38 @@ async def dashboard():
 
             // Recent events
             try {
-                const r = await fetch(DB + '/api/events?per_page=5');
+                const r = await fetch('/api/proxy/events?per_page=5');
                 const d = await r.json();
+                if (d.error) throw new Error(d.error);
                 const rows = (d.events || []).map(e =>
                     `<div class="stat"><span class="label">${e.scenario} (tier ${e.tier})</span><span class="value">${(e.confidence||0).toFixed(2)} @ ${e.created_at || ''}</span></div>`
                 ).join('');
                 document.getElementById('events-card').innerHTML = `<h2>Recent Events (${d.total})</h2>` + (rows || '<div class="loading">No events yet</div>');
             } catch(e) {
                 document.getElementById('events-card').innerHTML = '<h2>Recent Events</h2><div class="error">Cannot load</div>';
+            }
+
+            // System metrics (CPU/RAM/GPU/VRAM)
+            try {
+                const r = await fetch('/api/proxy/system');
+                const d = await r.json();
+                if (d.error) throw new Error(d.error);
+                const cpu = d.cpu_percent ?? 0;
+                const ram = d.ram || {};
+                const gpu = d.gpu || {};
+                const vramPct = (gpu.vram_percent ?? 0).toFixed(1);
+                const gpuUtil = (gpu.utilization_percent ?? 0).toFixed(1);
+                const ramPct = (ram.percent ?? 0).toFixed(1);
+
+                document.getElementById('system-card').innerHTML = `
+                    <h2>System</h2>
+                    <div class="stat"><span class="label">CPU</span><span class="value">${cpu.toFixed(1)}%</span></div>
+                    <div class="stat"><span class="label">RAM</span><span class="value">${ram.used_gb ?? 0} / ${ram.total_gb ?? 0} GB (${ramPct}%)</span></div>
+                    <div class="stat"><span class="label">GPU</span><span class="value">${gpu.name || 'N/A'} (${gpuUtil}%)</span></div>
+                    <div class="stat"><span class="label">VRAM</span><span class="value">${gpu.vram_used_mb ?? 0} / ${gpu.vram_total_mb ?? 0} MB (${vramPct}%)</span></div>
+                `;
+            } catch(e) {
+                document.getElementById('system-card').innerHTML = '<h2>System</h2><div class="error">Cannot load: ' + e.message + '</div>';
             }
         }
 
@@ -309,6 +343,120 @@ async def proxy_stats():
             return r.json()
         except Exception as e:
             return {"error": str(e)}
+
+
+@app.get("/api/proxy/cameras")
+async def proxy_cameras():
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(f"{DB_SERVER_URL}/api/cameras", timeout=8.0)
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@app.get("/api/proxy/cameras/{camera_id}")
+async def proxy_get_camera(camera_id: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.get(f"{DB_SERVER_URL}/api/cameras/{camera_id}", timeout=8.0)
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@app.post("/api/proxy/cameras")
+async def proxy_create_camera(request: Request):
+    async with httpx.AsyncClient() as client:
+        try:
+            body = await request.body()
+            r = await client.post(
+                f"{DB_SERVER_URL}/api/cameras",
+                content=body,
+                headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                timeout=8.0,
+            )
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@app.put("/api/proxy/cameras/{camera_id}")
+async def proxy_update_camera(camera_id: str, request: Request):
+    async with httpx.AsyncClient() as client:
+        try:
+            body = await request.body()
+            r = await client.put(
+                f"{DB_SERVER_URL}/api/cameras/{camera_id}",
+                content=body,
+                headers={"Content-Type": request.headers.get("Content-Type", "application/json")},
+                timeout=8.0,
+            )
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@app.delete("/api/proxy/cameras/{camera_id}")
+async def proxy_delete_camera(camera_id: str):
+    async with httpx.AsyncClient() as client:
+        try:
+            r = await client.delete(f"{DB_SERVER_URL}/api/cameras/{camera_id}", timeout=8.0)
+            return JSONResponse(content=r.json(), status_code=r.status_code)
+        except Exception as e:
+            return {"error": str(e)}
+
+
+@app.get("/api/proxy/system")
+async def proxy_system_metrics():
+    try:
+        cpu_percent = None
+        ram = {}
+        if psutil is not None:
+            cpu_percent = psutil.cpu_percent(interval=0.1)
+            vm = psutil.virtual_memory()
+            ram = {
+                "used_gb": round(vm.used / (1024 ** 3), 2),
+                "total_gb": round(vm.total / (1024 ** 3), 2),
+                "percent": vm.percent,
+            }
+
+        gpu = {
+            "name": "N/A",
+            "utilization_percent": 0.0,
+            "vram_used_mb": 0,
+            "vram_total_mb": 0,
+            "vram_percent": 0.0,
+        }
+        try:
+            cmd = [
+                "nvidia-smi",
+                "--query-gpu=name,utilization.gpu,memory.used,memory.total",
+                "--format=csv,noheader,nounits",
+            ]
+            out = subprocess.check_output(cmd, text=True, timeout=2).strip().splitlines()
+            if out:
+                first = [x.strip() for x in out[0].split(",")]
+                if len(first) >= 4:
+                    vram_used = float(first[2])
+                    vram_total = float(first[3]) if float(first[3]) > 0 else 0.0
+                    gpu = {
+                        "name": first[0],
+                        "utilization_percent": float(first[1]),
+                        "vram_used_mb": int(vram_used),
+                        "vram_total_mb": int(vram_total),
+                        "vram_percent": round((vram_used / vram_total) * 100, 1) if vram_total else 0.0,
+                    }
+        except Exception:
+            pass
+
+        return {
+            "cpu_percent": cpu_percent if cpu_percent is not None else 0.0,
+            "ram": ram,
+            "gpu": gpu,
+        }
+    except Exception as e:
+        return {"error": str(e)}
 
 
 # ---------------------------------------------------------------------------
@@ -415,4 +563,3 @@ async def vlm_proxy(request: Request, path: str):
                 {"success": False, "error": str(e)},
                 status_code=500,
             )
-

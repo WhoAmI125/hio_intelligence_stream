@@ -7,11 +7,14 @@ Wants=vlm-db.service
 Type=simple
 User=vlmapp
 Group=vlmapp
-WorkingDirectory=/home/ubuntu/vlm_new_deploy
-Environment=PYTHONPATH=/home/ubuntu/vlm_new_deploy
-EnvironmentFile=/home/ubuntu/vlm_new_deploy/.env
+WorkingDirectory=/home/ubuntu/hio_intelligence_stream
+Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
+Environment=HF_HOME=/home/ubuntu/hio_intelligence_stream/models/hf
+Environment=HF_MODULES_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/modules
+Environment=TRANSFORMERS_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/transformers
 
-ExecStart=/home/ubuntu/vlm_new_deploy/venv/bin/uvicorn \
+ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
     model_server.main:app \
     --host 127.0.0.1 \
     --port 8000 \

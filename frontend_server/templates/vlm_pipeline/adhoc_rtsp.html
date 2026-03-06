@@ -319,8 +319,7 @@
 
 {% block extra_js %}
 <script>
-  const LS_KEY = "adhoc_multi_cctv_v3";
-  const LS_ZONE_KEY = "adhoc_zone_norm_v1";
+  const CAMERA_API_BASE = "/api/proxy/cameras";
   const POLL_MS = 2500;
 
   let cameras = {};
@@ -404,30 +403,69 @@
     return Object.keys(cameras);
   }
 
-  function loadStorage() {
-    try {
-      cameras = JSON.parse(localStorage.getItem(LS_KEY) || "{}");
-      if (!cameras || typeof cameras !== "object") cameras = {};
-    } catch {
-      cameras = {};
+  async function requestJson(method, url, body = null) {
+    const opts = { method, headers: {} };
+    if (body !== null) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
     }
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(() => ({}));
+    return { ok: res.ok, status: res.status, data };
   }
 
-  function saveStorage() {
-    localStorage.setItem(LS_KEY, JSON.stringify(cameras));
+  function normalizeZoneList(arr) {
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .filter((p) => Array.isArray(p) && p.length >= 2)
+      .map((p) => [Number(p[0]), Number(p[1])])
+      .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]))
+      .map((p) => [Math.max(0, Math.min(1, p[0])), Math.max(0, Math.min(1, p[1]))]);
   }
 
-  function loadZoneStorage() {
-    try {
-      zoneState = JSON.parse(localStorage.getItem(LS_ZONE_KEY) || "{}");
-      if (!zoneState || typeof zoneState !== "object") zoneState = {};
-    } catch {
-      zoneState = {};
+  function zonePackFromCamera(cam) {
+    return {
+      cashier: normalizeZoneList(cam?.cashier_zone),
+      drawer: normalizeZoneList(cam?.drawer_zone),
+    };
+  }
+
+  function applyCameraFromServer(cam) {
+    const cfg = normalizeCamera(cam || {});
+    if (!cfg.camera_id) return;
+    cameras[cfg.camera_id] = cfg;
+    zoneState[cfg.camera_id] = zonePackFromCamera(cam || {});
+  }
+
+  async function loadCamerasFromServer() {
+    cameras = {};
+    zoneState = {};
+    const { ok, data } = await requestJson("GET", CAMERA_API_BASE);
+    if (!ok) {
+      console.error("Failed to load cameras:", data);
+      return;
     }
+    const rows = Array.isArray(data.cameras) ? data.cameras : [];
+    rows.forEach((cam) => applyCameraFromServer(cam));
   }
 
-  function saveZoneStorage() {
-    localStorage.setItem(LS_ZONE_KEY, JSON.stringify(zoneState));
+  function cameraPayload(camId) {
+    const cfg = cameras[camId];
+    const z = ensureZonePack(camId);
+    return {
+      ...cfg,
+      camera_id: camId,
+      cashier_zone: normalizeZoneList(z.cashier),
+      drawer_zone: normalizeZoneList(z.drawer),
+    };
+  }
+
+  async function persistCameraToServer(camId, method = "PUT") {
+    const payload = cameraPayload(camId);
+    const url = method === "POST"
+      ? CAMERA_API_BASE
+      : `${CAMERA_API_BASE}/${encodeURIComponent(camId)}`;
+    return requestJson(method, url, payload);
   }
 
   function ensureZonePack(cameraId) {
@@ -437,24 +475,6 @@
     if (!Array.isArray(zoneState[cameraId].cashier)) zoneState[cameraId].cashier = [];
     if (!Array.isArray(zoneState[cameraId].drawer)) zoneState[cameraId].drawer = [];
     return zoneState[cameraId];
-  }
-
-  function migrateLegacyZone(cameraId) {
-    if (zoneState[cameraId]) return;
-    try {
-      const legacy = JSON.parse(localStorage.getItem(`zone_poly_${cameraId}`) || "{}");
-      if (!legacy || typeof legacy !== "object") return;
-      const norm = (arr) => Array.isArray(arr)
-        ? arr.filter((p) => Array.isArray(p) && p.length >= 2)
-          .map((p) => [Number(p[0]), Number(p[1])])
-          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]) && p[0] >= 0 && p[0] <= 1 && p[1] >= 0 && p[1] <= 1)
-        : [];
-      zoneState[cameraId] = {
-        cashier: norm(legacy.cashier),
-        drawer: norm(legacy.drawer),
-      };
-      saveZoneStorage();
-    } catch {}
   }
 
   function setZoneMode(mode) {
@@ -540,7 +560,6 @@
   }
 
   function loadZonesIntoEditor(cameraId) {
-    migrateLegacyZone(cameraId);
     ensureZonePack(cameraId);
     updateZoneMeta();
     drawZoneCanvas();
@@ -558,7 +577,6 @@
     const ny = (y - box.oy) / Math.max(box.rh, 1);
     const z = ensureZonePack(selectedCameraId);
     z[zoneMode].push([Math.max(0, Math.min(1, nx)), Math.max(0, Math.min(1, ny))]);
-    saveZoneStorage();
     updateZoneMeta();
     drawZoneCanvas();
   }
@@ -567,7 +585,6 @@
     if (!selectedCameraId) return;
     const z = ensureZonePack(selectedCameraId);
     z[zoneMode].pop();
-    saveZoneStorage();
     updateZoneMeta();
     drawZoneCanvas();
   }
@@ -576,7 +593,6 @@
     if (!selectedCameraId) return;
     const z = ensureZonePack(selectedCameraId);
     z[zoneMode] = [];
-    saveZoneStorage();
     updateZoneMeta();
     drawZoneCanvas();
   }
@@ -601,6 +617,12 @@
       alert(`Apply zones failed: ${data.error || "unknown"}`);
       return;
     }
+    const saved = await persistCameraToServer(selectedCameraId, "PUT");
+    if (!saved.ok || saved.data?.status !== "ok") {
+      alert(`Zone save failed: ${saved.data?.detail || saved.data?.error || "unknown"}`);
+      return;
+    }
+    applyCameraFromServer(saved.data.camera || cameraPayload(selectedCameraId));
     zoneMeta.textContent = `${zoneCountsText(selectedCameraId)} | applied ${new Date().toLocaleTimeString()}`;
     syncSettingsRoi();
   }
@@ -617,7 +639,7 @@
       clip_duration_sec: Number(cam.clip_duration_sec || 10),
       validation_clip_sec: Number(cam.validation_clip_sec || 10),
       evidence_mode: String(cam.evidence_mode || "hybrid"),
-      use_video_validation: true,
+      use_video_validation: cam.use_video_validation !== false,
     };
   }
 
@@ -692,13 +714,8 @@
   }
 
   async function postJson(url, body) {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body || {}),
-    });
-    const data = await res.json().catch(() => ({}));
-    return { ok: res.ok, data };
+    const { ok, data } = await requestJson("POST", url, body || {});
+    return { ok, data };
   }
 
   async function fetchStatus(camId) {
@@ -766,7 +783,7 @@
   }
   function closeAddModal() { addModal.classList.remove("open"); }
 
-  function addCamera(startAfter) {
+  async function addCamera(startAfter) {
     const camId = String(aCamId.value || "").trim();
     const rtsp = String(aRtsp.value || "").trim();
     const baseFps = Number(aBaseFps.value || 1.5);
@@ -774,10 +791,18 @@
     if (!validRtsp(rtsp)) return alert("Valid RTSP URL is required.");
 
     cameras[camId] = normalizeCamera({ camera_id: camId, rtsp_url: rtsp, base_fps: baseFps });
-    saveStorage();
+    ensureZonePack(camId);
+    const saved = await persistCameraToServer(camId, "POST");
+    if (!saved.ok || saved.data?.status !== "ok") {
+      delete cameras[camId];
+      delete zoneState[camId];
+      alert(`Save failed: ${saved.data?.detail || saved.data?.error || "unknown"}`);
+      return;
+    }
+    applyCameraFromServer(saved.data.camera || cameraPayload(camId));
     renderGrid();
     closeAddModal();
-    if (startAfter) startCamera(camId);
+    if (startAfter) await startCamera(camId);
   }
 
   function openSettings(camId) {
@@ -892,14 +917,19 @@
     });
   }
 
-  function saveSettings(startAfter) {
+  async function saveSettings(startAfter) {
     if (!selectedCameraId || !cameras[selectedCameraId]) return;
     const cfg = readSettingsConfig();
     if (!validRtsp(cfg.rtsp_url)) return alert("Valid RTSP URL is required.");
     cameras[selectedCameraId] = cfg;
-    saveStorage();
+    const saved = await persistCameraToServer(selectedCameraId, "PUT");
+    if (!saved.ok || saved.data?.status !== "ok") {
+      alert(`Save failed: ${saved.data?.detail || saved.data?.error || "unknown"}`);
+      return;
+    }
+    applyCameraFromServer(saved.data.camera || cameraPayload(selectedCameraId));
     renderGrid();
-    if (startAfter) startCamera(selectedCameraId);
+    if (startAfter) await startCamera(selectedCameraId);
   }
 
   function syncSettingsRoi() {
@@ -954,27 +984,31 @@
   document.getElementById("btnAddCamera").addEventListener("click", openAddModal);
   document.getElementById("btnEmptyAdd").addEventListener("click", openAddModal);
   document.getElementById("btnAddClose").addEventListener("click", closeAddModal);
-  document.getElementById("btnAddSave").addEventListener("click", () => addCamera(false));
-  document.getElementById("btnAddSaveStart").addEventListener("click", () => addCamera(true));
+  document.getElementById("btnAddSave").addEventListener("click", () => { void addCamera(false); });
+  document.getElementById("btnAddSaveStart").addEventListener("click", () => { void addCamera(true); });
 
   document.getElementById("btnStartAll").addEventListener("click", startAll);
   document.getElementById("btnStopAll").addEventListener("click", stopAll);
 
   document.getElementById("btnSetClose").addEventListener("click", closeSettings);
-  document.getElementById("btnSetSave").addEventListener("click", () => saveSettings(false));
-  document.getElementById("btnSetSaveStart").addEventListener("click", () => saveSettings(true));
+  document.getElementById("btnSetSave").addEventListener("click", () => { void saveSettings(false); });
+  document.getElementById("btnSetSaveStart").addEventListener("click", () => { void saveSettings(true); });
   document.getElementById("btnSetStart").addEventListener("click", () => selectedCameraId && startCamera(selectedCameraId));
   document.getElementById("btnSetStop").addEventListener("click", () => selectedCameraId && stopCamera(selectedCameraId));
   document.getElementById("btnSetFull").addEventListener("click", () => toggleFullscreen(setLiveWrap));
   document.getElementById("btnSetRoiOnly").addEventListener("click", () => selectedCameraId && openRoiModal(selectedCameraId, sRoiZone.value));
-  document.getElementById("btnSetDelete").addEventListener("click", () => {
+  document.getElementById("btnSetDelete").addEventListener("click", async () => {
     if (!selectedCameraId) return;
     if (!confirm(`Remove camera ${selectedCameraId}?`)) return;
+    const targetId = selectedCameraId;
+    const deleted = await requestJson("DELETE", `${CAMERA_API_BASE}/${encodeURIComponent(targetId)}`);
+    if (!deleted.ok || deleted.data?.status !== "ok") {
+      alert(`Delete failed: ${deleted.data?.detail || deleted.data?.error || "unknown"}`);
+      return;
+    }
     delete cameras[selectedCameraId];
     delete zoneState[selectedCameraId];
     delete statusCache[selectedCameraId];
-    saveStorage();
-    saveZoneStorage();
     closeSettings();
     renderGrid();
     updateGlobalStatus();
@@ -1021,11 +1055,14 @@
     if (e.target.id === "roiModal") closeRoiModal();
   });
 
-  loadStorage();
-  loadZoneStorage();
-  renderGrid();
-  pollStatuses();
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(pollStatuses, POLL_MS);
+  async function boot() {
+    await loadCamerasFromServer();
+    renderGrid();
+    await pollStatuses();
+    if (pollTimer) clearInterval(pollTimer);
+    pollTimer = setInterval(pollStatuses, POLL_MS);
+  }
+
+  void boot();
 </script>
 {% endblock %}

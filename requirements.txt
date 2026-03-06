@@ -8,6 +8,8 @@ opencv-python
 numpy
 Pillow
 requests
+einops
+timm
 
 # Database & Frontend Servers (API & Web)
 fastapi

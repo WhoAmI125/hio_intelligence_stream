@@ -22,9 +22,10 @@ import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, Query, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -128,12 +129,32 @@ def init_db():
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
 
+        CREATE TABLE IF NOT EXISTS cameras (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            camera_id TEXT UNIQUE NOT NULL,
+            rtsp_url TEXT NOT NULL,
+            base_fps REAL DEFAULT 1.5,
+            rtsp_transport TEXT DEFAULT 'tcp',
+            open_timeout_ms INTEGER DEFAULT 8000,
+            read_timeout_ms INTEGER DEFAULT 8000,
+            event_cooldown_sec INTEGER DEFAULT 20,
+            clip_duration_sec INTEGER DEFAULT 10,
+            validation_clip_sec INTEGER DEFAULT 10,
+            evidence_mode TEXT DEFAULT 'hybrid',
+            use_video_validation INTEGER DEFAULT 1,
+            cashier_zone TEXT DEFAULT '[]',
+            drawer_zone TEXT DEFAULT '[]',
+            created_at TEXT DEFAULT (datetime('now', 'localtime')),
+            updated_at TEXT DEFAULT (datetime('now', 'localtime'))
+        );
+
         CREATE INDEX IF NOT EXISTS idx_events_event_id ON events(event_id);
         CREATE INDEX IF NOT EXISTS idx_events_camera_id ON events(camera_id);
         CREATE INDEX IF NOT EXISTS idx_events_event_type ON events(event_type);
         CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
         CREATE INDEX IF NOT EXISTS idx_gemini_logs_event_id ON gemini_logs(event_id);
         CREATE INDEX IF NOT EXISTS idx_gemini_logs_created ON gemini_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_cameras_updated_at ON cameras(updated_at);
     """)
     conn.close()
     logger.info(f"Database initialized: {DB_PATH}")
@@ -175,12 +196,224 @@ class FeedbackRequest(BaseModel):
     reviewer: str = ""
 
 
+class CameraConfigRequest(BaseModel):
+    camera_id: str
+    rtsp_url: str
+    base_fps: float = 1.5
+    rtsp_transport: str = "tcp"
+    open_timeout_ms: int = 8000
+    read_timeout_ms: int = 8000
+    event_cooldown_sec: int = 20
+    clip_duration_sec: int = 10
+    validation_clip_sec: int = 10
+    evidence_mode: str = "hybrid"
+    use_video_validation: bool = True
+    cashier_zone: list[list[float]] = []
+    drawer_zone: list[list[float]] = []
+
+
+def _is_valid_rtsp_url(rtsp_url: str) -> bool:
+    raw = str(rtsp_url or "").strip()
+    if not raw:
+        return False
+    try:
+        parsed = urlparse(raw)
+    except Exception:
+        return False
+    if (parsed.scheme or "").lower() not in {"rtsp", "rtsps"}:
+        return False
+    return bool(parsed.hostname)
+
+
+def _normalize_zone_points(points: Any) -> list[list[float]]:
+    if not isinstance(points, list):
+        return []
+    out: list[list[float]] = []
+    for p in points:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            continue
+        try:
+            x = float(p[0])
+            y = float(p[1])
+        except Exception:
+            continue
+        if not (x == x and y == y):
+            continue
+        x = max(0.0, min(1.0, x))
+        y = max(0.0, min(1.0, y))
+        out.append([x, y])
+    return out
+
+
+def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    cashier_zone: list[list[float]] = []
+    drawer_zone: list[list[float]] = []
+    try:
+        cashier_zone = _normalize_zone_points(json.loads(row["cashier_zone"] or "[]"))
+    except Exception:
+        cashier_zone = []
+    try:
+        drawer_zone = _normalize_zone_points(json.loads(row["drawer_zone"] or "[]"))
+    except Exception:
+        drawer_zone = []
+
+    return {
+        "camera_id": row["camera_id"],
+        "rtsp_url": row["rtsp_url"],
+        "base_fps": float(row["base_fps"] or 1.5),
+        "rtsp_transport": row["rtsp_transport"] or "tcp",
+        "open_timeout_ms": int(row["open_timeout_ms"] or 8000),
+        "read_timeout_ms": int(row["read_timeout_ms"] or 8000),
+        "event_cooldown_sec": int(row["event_cooldown_sec"] or 20),
+        "clip_duration_sec": int(row["clip_duration_sec"] or 10),
+        "validation_clip_sec": int(row["validation_clip_sec"] or 10),
+        "evidence_mode": row["evidence_mode"] or "hybrid",
+        "use_video_validation": bool(row["use_video_validation"]),
+        "cashier_zone": cashier_zone,
+        "drawer_zone": drawer_zone,
+        "created_at": row["created_at"],
+        "updated_at": row["updated_at"],
+    }
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
 @app.get("/")
 def health():
     return {"status": "ok", "service": "db_server", "db_path": DB_PATH}
+
+
+@app.get("/api/cameras")
+def list_cameras():
+    conn = get_db()
+    rows = conn.execute(
+        "SELECT * FROM cameras ORDER BY updated_at DESC, camera_id ASC"
+    ).fetchall()
+    conn.close()
+    return {"cameras": [_camera_row_to_dict(r) for r in rows]}
+
+
+@app.get("/api/cameras/{camera_id}")
+def get_camera(camera_id: str):
+    camera_id = str(camera_id or "").strip()
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+    conn = get_db()
+    row = conn.execute(
+        "SELECT * FROM cameras WHERE camera_id = ?",
+        (camera_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {"camera": _camera_row_to_dict(row)}
+
+
+def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
+    camera_id = str(camera_id or "").strip()
+    rtsp_url = str(req.rtsp_url or "").strip()
+
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+    if not _is_valid_rtsp_url(rtsp_url):
+        raise HTTPException(status_code=400, detail="Valid rtsp_url is required")
+
+    payload = {
+        "camera_id": camera_id,
+        "rtsp_url": rtsp_url,
+        "base_fps": float(req.base_fps or 1.5),
+        "rtsp_transport": (str(req.rtsp_transport or "tcp").strip() or "tcp"),
+        "open_timeout_ms": int(req.open_timeout_ms or 8000),
+        "read_timeout_ms": int(req.read_timeout_ms or 8000),
+        "event_cooldown_sec": int(req.event_cooldown_sec or 20),
+        "clip_duration_sec": int(req.clip_duration_sec or 10),
+        "validation_clip_sec": int(req.validation_clip_sec or 10),
+        "evidence_mode": (str(req.evidence_mode or "hybrid").strip() or "hybrid"),
+        "use_video_validation": 1 if req.use_video_validation else 0,
+        "cashier_zone": json.dumps(_normalize_zone_points(req.cashier_zone), ensure_ascii=False),
+        "drawer_zone": json.dumps(_normalize_zone_points(req.drawer_zone), ensure_ascii=False),
+    }
+
+    conn = get_db()
+    conn.execute(
+        """
+        INSERT INTO cameras (
+            camera_id, rtsp_url, base_fps, rtsp_transport, open_timeout_ms, read_timeout_ms,
+            event_cooldown_sec, clip_duration_sec, validation_clip_sec, evidence_mode,
+            use_video_validation, cashier_zone, drawer_zone, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+        ON CONFLICT(camera_id) DO UPDATE SET
+            rtsp_url = excluded.rtsp_url,
+            base_fps = excluded.base_fps,
+            rtsp_transport = excluded.rtsp_transport,
+            open_timeout_ms = excluded.open_timeout_ms,
+            read_timeout_ms = excluded.read_timeout_ms,
+            event_cooldown_sec = excluded.event_cooldown_sec,
+            clip_duration_sec = excluded.clip_duration_sec,
+            validation_clip_sec = excluded.validation_clip_sec,
+            evidence_mode = excluded.evidence_mode,
+            use_video_validation = excluded.use_video_validation,
+            cashier_zone = excluded.cashier_zone,
+            drawer_zone = excluded.drawer_zone,
+            updated_at = datetime('now', 'localtime')
+        """,
+        (
+            payload["camera_id"],
+            payload["rtsp_url"],
+            payload["base_fps"],
+            payload["rtsp_transport"],
+            payload["open_timeout_ms"],
+            payload["read_timeout_ms"],
+            payload["event_cooldown_sec"],
+            payload["clip_duration_sec"],
+            payload["validation_clip_sec"],
+            payload["evidence_mode"],
+            payload["use_video_validation"],
+            payload["cashier_zone"],
+            payload["drawer_zone"],
+        ),
+    )
+    conn.commit()
+    row = conn.execute(
+        "SELECT * FROM cameras WHERE camera_id = ?",
+        (camera_id,),
+    ).fetchone()
+    conn.close()
+    if row is None:
+        raise HTTPException(status_code=500, detail="Camera upsert failed")
+    return _camera_row_to_dict(row)
+
+
+@app.post("/api/cameras")
+def create_camera(req: CameraConfigRequest):
+    camera = _upsert_camera(str(req.camera_id or "").strip(), req)
+    return {"status": "ok", "camera": camera}
+
+
+@app.put("/api/cameras/{camera_id}")
+def update_camera(camera_id: str, req: CameraConfigRequest):
+    req_camera_id = str(req.camera_id or "").strip()
+    camera_id = str(camera_id or "").strip()
+    if req_camera_id and req_camera_id != camera_id:
+        raise HTTPException(status_code=400, detail="camera_id mismatch between path and body")
+    camera = _upsert_camera(camera_id, req)
+    return {"status": "ok", "camera": camera}
+
+
+@app.delete("/api/cameras/{camera_id}")
+def delete_camera(camera_id: str):
+    camera_id = str(camera_id or "").strip()
+    if not camera_id:
+        raise HTTPException(status_code=400, detail="camera_id is required")
+
+    conn = get_db()
+    cur = conn.execute("DELETE FROM cameras WHERE camera_id = ?", (camera_id,))
+    conn.commit()
+    conn.close()
+    if cur.rowcount <= 0:
+        raise HTTPException(status_code=404, detail="Camera not found")
+    return {"status": "ok", "camera_id": camera_id}
 
 
 @app.post("/api/flush")
