@@ -8,6 +8,7 @@ User=vlmapp
 Group=vlmapp
 WorkingDirectory=/home/ubuntu/hio_intelligence_stream
 Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+Environment=TZ=Asia/Seoul
 EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
 
 ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \

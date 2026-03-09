@@ -21,6 +21,8 @@ import sys
 import time
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
+from urllib import error as urlerror
+from urllib import request as urlrequest
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -64,6 +66,7 @@ rule_updater: RuleUpdater | None = None
 data_collector: DataCollector | None = None
 ws_clients: list[WebSocket] = []
 is_shutting_down: bool = False
+startup_restore_task: asyncio.Task[Any] | None = None
 
 
 def _florence_device_status() -> dict[str, Any]:
@@ -82,6 +85,239 @@ def _florence_device_status() -> dict[str, Any]:
     }
 
 
+def _env_bool_local(key: str, default: bool) -> bool:
+    raw = str(os.getenv(key, "")).strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _env_float_local(key: str, default: float) -> float:
+    try:
+        return float(os.getenv(key, str(default)))
+    except Exception:
+        return default
+
+
+def _env_int_local(key: str, default: int) -> int:
+    try:
+        return int(os.getenv(key, str(default)))
+    except Exception:
+        return default
+
+
+def _http_get_json(url: str, timeout_sec: float = 8.0) -> dict[str, Any]:
+    req = urlrequest.Request(url, method="GET")
+    with urlrequest.urlopen(req, timeout=timeout_sec) as resp:
+        payload = resp.read()
+    data = json.loads(payload.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("Invalid JSON response")
+    return data
+
+
+def _http_post_json(url: str, body: dict[str, Any], timeout_sec: float = 20.0) -> dict[str, Any]:
+    payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    req = urlrequest.Request(
+        url,
+        data=payload,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    with urlrequest.urlopen(req, timeout=timeout_sec) as resp:
+        raw = resp.read()
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise RuntimeError("Invalid JSON response")
+    return data
+
+
+def _normalize_zone_points(points: Any) -> list[list[float]]:
+    if not isinstance(points, list):
+        return []
+    out: list[list[float]] = []
+    for p in points:
+        if not isinstance(p, (list, tuple)) or len(p) < 2:
+            continue
+        try:
+            x = float(p[0])
+            y = float(p[1])
+        except Exception:
+            continue
+        out.append([max(0.0, min(1.0, x)), max(0.0, min(1.0, y))])
+    return out
+
+
+def _zone_norm_to_pixels(points: list[list[float]], width: int, height: int) -> list[list[int]]:
+    w = max(1, int(width))
+    h = max(1, int(height))
+    return [
+        [int(round(p[0] * w)), int(round(p[1] * h))]
+        for p in points
+    ]
+
+
+def _fetch_saved_cameras() -> list[dict[str, Any]]:
+    db_base = str(getattr(config, "DB_SERVER_URL", "http://localhost:8001")).rstrip("/")
+    data = _http_get_json(f"{db_base}/api/cameras", timeout_sec=8.0)
+    cameras = data.get("cameras")
+    if isinstance(cameras, list):
+        return [c for c in cameras if isinstance(c, dict)]
+    return []
+
+
+def _wait_frame_size(camera_id: str, timeout_sec: float = 20.0, poll_sec: float = 0.5) -> tuple[int, int] | None:
+    deadline = time.time() + max(1.0, float(timeout_sec))
+    while time.time() < deadline:
+        mgr = stream_manager
+        if mgr is None:
+            time.sleep(poll_sec)
+            continue
+        try:
+            frame = mgr.get_frame(camera_id)
+        except Exception:
+            frame = None
+        if frame is not None and hasattr(frame, "shape") and len(frame.shape) >= 2:
+            h = int(frame.shape[0])
+            w = int(frame.shape[1])
+            if w > 1 and h > 1:
+                return (w, h)
+        time.sleep(poll_sec)
+    return None
+
+
+def _restore_cameras_sync() -> None:
+    if not _env_bool_local("AUTO_RESTORE_CAMERAS_ON_BOOT", True):
+        logger.info("Auto-restore disabled by AUTO_RESTORE_CAMERAS_ON_BOOT=false")
+        return
+
+    db_retries = max(1, _env_int_local("AUTO_RESTORE_DB_RETRIES", 20))
+    db_retry_sec = max(1.0, _env_float_local("AUTO_RESTORE_DB_RETRY_SEC", 3.0))
+    frame_wait_sec = max(3.0, _env_float_local("AUTO_RESTORE_FRAME_WAIT_SEC", 20.0))
+    between_cam_sec = max(0.2, _env_float_local("AUTO_RESTORE_BETWEEN_CAM_SEC", 1.5))
+    model_base = str(os.getenv("AUTO_RESTORE_MODEL_SERVER_URL", "http://127.0.0.1:8000")).rstrip("/")
+
+    cameras: list[dict[str, Any]] = []
+    for attempt in range(1, db_retries + 1):
+        try:
+            cameras = _fetch_saved_cameras()
+            break
+        except Exception as e:
+            logger.warning(
+                "Auto-restore: camera list fetch failed (%s/%s): %s",
+                attempt, db_retries, e
+            )
+            time.sleep(db_retry_sec)
+
+    if not cameras:
+        logger.info("Auto-restore: no saved cameras found; skipping.")
+        return
+
+    started = 0
+    zone_applied = 0
+    failed = 0
+    logger.info("Auto-restore: restoring %d camera(s) sequentially...", len(cameras))
+
+    for cam in cameras:
+        camera_id = str(cam.get("camera_id", "")).strip()
+        rtsp_url = str(cam.get("rtsp_url", "")).strip()
+        if not camera_id or not rtsp_url:
+            failed += 1
+            logger.warning(
+                "Auto-restore: skipping invalid camera config (camera_id=%s)", camera_id or "-"
+            )
+            continue
+
+        start_payload = {
+            "camera_id": camera_id,
+            "rtsp_url": rtsp_url,
+            "base_fps": float(cam.get("base_fps", config.BASE_FPS)),
+            "rtsp_transport": str(cam.get("rtsp_transport", config.RTSP_TRANSPORT)),
+            "open_timeout_ms": int(cam.get("open_timeout_ms", config.RTSP_OPEN_TIMEOUT_MS)),
+            "read_timeout_ms": int(cam.get("read_timeout_ms", config.RTSP_READ_TIMEOUT_MS)),
+            "event_cooldown_sec": int(cam.get("event_cooldown_sec", 20)),
+            "clip_duration_sec": int(cam.get("clip_duration_sec", 10)),
+            "validation_clip_sec": int(cam.get("validation_clip_sec", 10)),
+            "evidence_mode": str(cam.get("evidence_mode", config.EVIDENCE_MODE)),
+        }
+
+        try:
+            start_resp = _http_post_json(
+                f"{model_base}/api/vlm/start/",
+                start_payload,
+                timeout_sec=25.0,
+            )
+            if not bool(start_resp.get("success")):
+                failed += 1
+                logger.warning(
+                    "Auto-restore: start failed for %s: %s",
+                    camera_id, start_resp.get("error", "unknown")
+                )
+                continue
+            started += 1
+        except urlerror.HTTPError as e:
+            failed += 1
+            logger.warning("Auto-restore: start HTTP error for %s: %s", camera_id, e)
+            continue
+        except Exception as e:
+            failed += 1
+            logger.warning("Auto-restore: start error for %s: %s", camera_id, e)
+            continue
+
+        cashier_zone_norm = _normalize_zone_points(cam.get("cashier_zone"))
+        drawer_zone_norm = _normalize_zone_points(cam.get("drawer_zone"))
+        if not cashier_zone_norm and not drawer_zone_norm:
+            time.sleep(between_cam_sec)
+            continue
+
+        size = _wait_frame_size(camera_id, timeout_sec=frame_wait_sec, poll_sec=0.5)
+        if size is None:
+            logger.warning(
+                "Auto-restore: no frame for %s within %.1fs; zone apply skipped.",
+                camera_id, frame_wait_sec
+            )
+            time.sleep(between_cam_sec)
+            continue
+
+        width, height = size
+        zone_payload = {
+            "camera_id": camera_id,
+            "cashier_zone": _zone_norm_to_pixels(cashier_zone_norm, width, height),
+            "drawer_zone": _zone_norm_to_pixels(drawer_zone_norm, width, height),
+        }
+        try:
+            zone_resp = _http_post_json(
+                f"{model_base}/api/vlm/zones/",
+                zone_payload,
+                timeout_sec=10.0,
+            )
+            if bool(zone_resp.get("success")):
+                zone_applied += 1
+            else:
+                logger.warning(
+                    "Auto-restore: zone apply failed for %s: %s",
+                    camera_id, zone_resp.get("error", "unknown")
+                )
+        except Exception as e:
+            logger.warning("Auto-restore: zone apply error for %s: %s", camera_id, e)
+
+        time.sleep(between_cam_sec)
+
+    logger.info(
+        "Auto-restore complete: started=%d zone_applied=%d failed=%d total=%d",
+        started, zone_applied, failed, len(cameras)
+    )
+
+
+async def _restore_cameras_after_startup() -> None:
+    delay_sec = max(0.0, _env_float_local("AUTO_RESTORE_DELAY_SEC", 4.0))
+    if delay_sec > 0:
+        await asyncio.sleep(delay_sec)
+    await asyncio.to_thread(_restore_cameras_sync)
+
+
 # ---------------------------------------------------------------------------
 # Lifespan — startup / shutdown
 # ---------------------------------------------------------------------------
@@ -89,7 +325,7 @@ def _florence_device_status() -> dict[str, Any]:
 async def lifespan(app: FastAPI):
     global stream_manager, local_storage, flush_worker
     global florence_adapter, gemini_validator, pipeline_orchestrator, evidence_router, agents, shadow_agents
-    global critic_trainer, rule_updater, data_collector, is_shutting_down
+    global critic_trainer, rule_updater, data_collector, is_shutting_down, startup_restore_task
 
     logger.info("=" * 60)
     logger.info("Model Server starting up...")
@@ -230,6 +466,10 @@ async def lifespan(app: FastAPI):
         f"(dir={config.LORA_DATA_DIR})"
     )
 
+    # Restore cameras/zones from DB after reboot.
+    # Runs in background thread and starts cameras sequentially to limit resource spikes.
+    startup_restore_task = asyncio.create_task(_restore_cameras_after_startup())
+
     logger.info("Model Server ready.")
 
     yield  # ← app is running
@@ -249,6 +489,15 @@ async def lifespan(app: FastAPI):
 
     if stream_manager:
         stream_manager.stop_all()
+    if startup_restore_task is not None and not startup_restore_task.done():
+        startup_restore_task.cancel()
+        try:
+            await startup_restore_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.warning(f"Startup restore task shutdown warning: {e}")
+    startup_restore_task = None
     for sa in shadow_agents.values():
         sa.stop()
     if flush_worker:
@@ -542,4 +791,3 @@ def lora_status():
         result["training_readiness"] = data_collector.export_for_training()
 
     return result
-

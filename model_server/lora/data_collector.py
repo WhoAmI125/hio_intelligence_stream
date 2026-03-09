@@ -59,6 +59,8 @@ class DataCollector:
         self.base_dir = Path(base_dir)
         self.images_dir = self.base_dir / "images"
         self.annotations_path = self.base_dir / "annotations.jsonl"
+        self.florence_feedback_dir = self.base_dir / "LoRa_Flourence_feedback"
+        self.florence_feedback_log_path = self.florence_feedback_dir / "feedback_log.jsonl"
         self.normal_ratio = normal_ratio
         self.max_samples = max_samples
         self.enabled = enabled
@@ -71,6 +73,7 @@ class DataCollector:
 
         # Create directories
         self.images_dir.mkdir(parents=True, exist_ok=True)
+        self.florence_feedback_dir.mkdir(parents=True, exist_ok=True)
 
         # Count existing samples
         if self.annotations_path.exists():
@@ -376,6 +379,116 @@ class DataCollector:
         except Exception as e:
             logger.error(f"[DataCollector] Feedback save failed: {e}")
             return False
+
+    def collect_florence_feedback(
+        self,
+        *,
+        event_id: str,
+        decision: str,
+        note: str = "",
+        frame: Optional[np.ndarray] = None,
+        caption: str = "",
+        scenario: str = "",
+        camera_id: str = "",
+        summary: Optional[Dict[str, Any]] = None,
+        source: str = "LoRa_Flourence_feedback",
+    ) -> Dict[str, Any]:
+        """
+        Collect feedback from Florence inference log UI and wire directly to LoRA dataset.
+
+        Behavior:
+        - Always write an audit entry into LoRa_Flourence_feedback/feedback_log.jsonl
+        - For decision accept/decline with valid frame+caption, also append a sample
+          to annotations.jsonl + images/ so LoRA training can use it directly.
+        """
+        if not self.enabled:
+            return {"success": False, "error": "data_collector_disabled"}
+
+        decision_norm = str(decision or "").strip().lower()
+        if decision_norm in {"not_decide", "not-decide"}:
+            decision_norm = "unsure"
+        if decision_norm not in {"accept", "decline", "unsure"}:
+            return {"success": False, "error": "invalid_decision"}
+
+        ts = int(time.time() * 1000)
+        safe_event = self._safe_token(event_id)
+        safe_scenario = self._safe_token(scenario or "unknown")
+        safe_camera = self._safe_token(camera_id or "unknown")
+
+        saved_sample_id = ""
+        saved_image_rel = ""
+        saved_annotation = False
+
+        try:
+            # accept/decline can become supervised LoRA samples when frame+caption is available.
+            if decision_norm in {"accept", "decline"} and frame is not None and caption:
+                label = "true_positive" if decision_norm == "accept" else "false_positive"
+                saved_sample_id = f"florence_feedback_{label}_{safe_scenario}_{safe_event}_{ts}_{safe_camera}"
+                image_filename = f"{saved_sample_id}.jpg"
+                image_path = self.images_dir / image_filename
+                cv2.imwrite(str(image_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 90])
+                saved_image_rel = f"images/{image_filename}"
+
+                annotation = {
+                    "sample_id": saved_sample_id,
+                    "image": saved_image_rel,
+                    "prefix": "<MORE_DETAILED_CAPTION>",
+                    "suffix": str(caption),
+                    "scenario": str(scenario or ""),
+                    "label": label,
+                    "confidence": 1.0 if label == "true_positive" else 0.0,
+                    "matched_keywords": [],
+                    "feedback": {
+                        "source": source,
+                        "event_id": event_id,
+                        "decision": decision_norm,
+                        "note": note,
+                        "summary": summary or {},
+                    },
+                    "camera_id": str(camera_id or ""),
+                    "collected_at": datetime.now().isoformat(),
+                }
+
+                with self._lock:
+                    with open(self.annotations_path, "a", encoding="utf-8") as f:
+                        f.write(json.dumps(annotation, ensure_ascii=False) + "\n")
+                    self._sample_count += 1
+                    self._feedback_count += 1
+                saved_annotation = True
+
+            audit_entry = {
+                "event_id": event_id,
+                "decision": decision_norm,
+                "note": str(note or ""),
+                "scenario": str(scenario or ""),
+                "camera_id": str(camera_id or ""),
+                "source": source,
+                "summary": summary or {},
+                "saved_annotation": saved_annotation,
+                "sample_id": saved_sample_id,
+                "image": saved_image_rel,
+                "at": datetime.now().isoformat(),
+            }
+
+            with self._lock:
+                with open(self.florence_feedback_log_path, "a", encoding="utf-8") as f:
+                    f.write(json.dumps(audit_entry, ensure_ascii=False) + "\n")
+                self._feedback_count += 1
+
+            if self._sample_count > self.max_samples:
+                self._cleanup_oldest()
+
+            return {
+                "success": True,
+                "saved_annotation": saved_annotation,
+                "sample_id": saved_sample_id,
+                "image": saved_image_rel,
+                "annotations_path": str(self.annotations_path),
+                "florence_feedback_log_path": str(self.florence_feedback_log_path),
+            }
+        except Exception as e:
+            logger.error(f"[DataCollector] Florence feedback save failed: {e}")
+            return {"success": False, "error": str(e)}
 
     # ------------------------------------------------------------------
     # Stats & Management

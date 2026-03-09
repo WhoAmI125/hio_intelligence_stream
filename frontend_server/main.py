@@ -43,6 +43,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(name)s] %(levelna
 # ---------------------------------------------------------------------------
 MODEL_SERVER_URL = os.getenv("MODEL_SERVER_URL", "http://localhost:8000")
 DB_SERVER_URL = os.getenv("DB_SERVER_URL", "http://localhost:8001")
+PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DATA_DIR = os.path.join(PROJECT_DIR, "data")
 TEMPLATE_DIR = os.path.join(os.path.dirname(__file__), "templates")
 VLM_TEMPLATE_DIR = os.path.join(TEMPLATE_DIR, "vlm_pipeline")
 
@@ -114,6 +116,11 @@ app.add_middleware(
 
 # Jinja2 templates — directory set to 'templates/' so {% extends "vlm_pipeline/base_public.html" %} works
 templates = Jinja2Templates(directory=TEMPLATE_DIR)
+if os.path.isdir(DATA_DIR):
+    # Serve local clip/thumbnail files under /media/*
+    app.mount("/media", StaticFiles(directory=DATA_DIR), name="media")
+else:
+    logger.warning(f"Media directory not found, skipping /media mount: {DATA_DIR}")
 
 
 # ---------------------------------------------------------------------------
@@ -163,6 +170,22 @@ async def gemini_logs_monitor(request: Request):
         return templates.TemplateResponse(
             "vlm_pipeline/gemini_logs.html",
             {"request": request, "active_page": "gemini"},
+        )
+    except Exception as e:
+        logger.error(f"Template render error: {e}")
+        return HTMLResponse(
+            content=f"<h1>Template error</h1><pre>{e}</pre>",
+            status_code=500,
+        )
+
+
+@app.get("/monitor/florence-logs", response_class=HTMLResponse)
+async def florence_logs_monitor(request: Request):
+    """Florence inference result log UI rendered via Jinja2."""
+    try:
+        return templates.TemplateResponse(
+            "vlm_pipeline/florence_logs.html",
+            {"request": request, "active_page": "florence"},
         )
     except Exception as e:
         logger.error(f"Template render error: {e}")

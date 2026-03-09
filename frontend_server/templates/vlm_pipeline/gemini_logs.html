@@ -7,6 +7,7 @@
 {% block extra_css %}
 <style>
   .btn { border:1px solid var(--line); border-radius:9px; padding:8px 12px; background:#fff; color:var(--text); font-size:13px; font-weight:800; cursor:pointer; }
+  .btn.main { background: var(--primary); color:#fff; border-color: var(--primary); }
   .filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; }
   .field { display:flex; flex-direction:column; gap:4px; min-width:150px; }
   .field label { font-size:12px; color:var(--sub); font-weight:700; }
@@ -28,15 +29,33 @@
   .mid { color:#7f5600; border-color:#f4cc80; background:#fff3de; }
   .link { color:#1d67d7; text-decoration:none; font-weight:700; }
   .reason-btn { border:1px solid #bdd8ff; border-radius:8px; background:#ecf5ff; color:#144e99; padding:4px 8px; font-size:11px; font-weight:700; cursor:pointer; max-width:260px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap; }
+  .fb-btn { border:1px solid #8db3ef; border-radius:8px; background:#edf4ff; color:#123f83; padding:4px 8px; font-size:11px; font-weight:800; cursor:pointer; }
+  .fb-pill { display:inline-flex; align-items:center; border:1px solid transparent; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; }
+  .fb-note { margin-top:4px; color:#3f556f; font-size:11px; line-height:1.4; }
   .muted { color:var(--sub); font-size:12px; }
   .legend { margin-bottom:10px; border:1px solid var(--line); border-radius:10px; background:#f7fbff; padding:8px 10px; font-size:12px; color:#244464; }
   .modal { display:none; position:fixed; inset:0; z-index:3000; background:rgba(10,17,31,0.48); align-items:center; justify-content:center; padding:10px; }
   .modal.open { display:flex; }
   .modal-card { width:min(760px,96vw); max-height:82vh; overflow:hidden; border-radius:14px; background:#fff; border:1px solid var(--line); box-shadow:0 20px 52px rgba(9,17,31,0.32); }
-  .modal-head { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:14px; font-weight:800; }
+  .modal-head { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; gap:8px; font-size:14px; font-weight:800; background:#f4f8ff; }
   .modal-body { padding:12px 14px; overflow:auto; max-height:calc(82vh - 56px); }
   .modal-pre { margin:0; white-space:pre-wrap; word-break:break-word; font-size:12px; line-height:1.5; color:#1d314a; }
+  .modal-guide { margin-bottom:10px; border:1px solid var(--line); border-radius:8px; background:#f7faff; padding:8px 10px; font-size:12px; line-height:1.5; }
+  .modal-guide h3 { margin:0 0 6px; font-size:12px; color:#2d3f59; }
+  .modal-guide .guide-row { margin-bottom:4px; }
+  .modal-guide .guide-row:last-child { margin-bottom:0; }
+  .fb-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
+  .fb-field { display:flex; flex-direction:column; gap:4px; }
+  .fb-field.full { grid-column:1 / -1; }
+  .fb-field label { font-size:12px; color:#2f445f; font-weight:700; }
+  .fb-field input,.fb-field select,.fb-field textarea { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; font-family:inherit; outline:none; }
+  .fb-field input:focus,.fb-field select:focus,.fb-field textarea:focus { border-color:#9dc2ff; box-shadow:0 0 0 3px rgba(18, 88, 212, 0.12); }
+  .fb-help { font-size:11px; color:var(--sub); line-height:1.35; }
+  .fb-msg { margin-bottom:8px; border-radius:8px; padding:8px 10px; font-size:12px; display:none; }
+  .fb-msg.error { color:#8b1235; background:#fff0f3; border:1px solid #f6c1cd; }
+  .modal-foot { padding:10px 12px; border-top:1px solid var(--line); display:flex; justify-content:flex-end; gap:8px; }
   @media (max-width:900px) { .stats { grid-template-columns:repeat(2,minmax(120px,1fr)); } }
+  @media (max-width:700px) { .fb-grid { grid-template-columns:1fr; } }
   @media (max-width:560px) { .stats { grid-template-columns:1fr; } .filters { flex-direction:column; } .field { width:100%; } }
 </style>
 {% endblock %}
@@ -81,7 +100,7 @@
 </div>
 
 <div class="legend">
-  `SKIP` = Gemini 미호출(Tier1에서 불확실성 게이트 통과). 즉, 오탐이 아니라 API 호출 생략 상태입니다.
+  `SKIP` = Gemini 미호출(Tier1에서 불확실성 게이트 통과). 오탐이 아니라 Gemini API 호출 생략 상태입니다.
 </div>
 
 <div class="stats">
@@ -102,11 +121,12 @@
         <th style="width:78px;">Conf</th>
         <th style="width:110px;">Input</th>
         <th>Reason</th>
+        <th style="width:210px;">Feedback</th>
         <th style="width:180px;">Media</th>
       </tr>
     </thead>
     <tbody id="rows">
-      <tr><td colspan="8" class="muted">loading...</td></tr>
+      <tr><td colspan="9" class="muted">loading...</td></tr>
     </tbody>
   </table>
 </div>
@@ -122,12 +142,118 @@
     </div>
   </div>
 </div>
+
+<div id="feedbackModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="fbTitle">
+  <div class="modal-card">
+    <div class="modal-head">
+      <span id="fbTitle">Shadow Feedback</span>
+      <button id="btnFbClose" class="btn" type="button">Close</button>
+    </div>
+    <div class="modal-body">
+      <div id="fbError" class="fb-msg error"></div>
+      <div class="modal-guide">
+        <h3>How to write high-quality feedback</h3>
+        <div class="guide-row" id="fbDecisionGuide">이 피드백은 Main Agent가 아니라 Shadow Agent 학습/튜닝 경로로 저장됩니다. 사실 기반으로 작성하세요.</div>
+        <div class="guide-row"><b>Decline 순서</b>: 1) 관찰 사실 2) 왜 틀렸는지 3) 기대 판정</div>
+        <div class="guide-row"><b>NotDecide 순서</b>: 1) 무엇이 불명확한지 2) 어떤 추가 근거가 필요한지</div>
+        <div class="guide-row">권장 템플릿: <code>[관찰 사실] + [오판/불확실 이유] + [기대 결과]</code></div>
+        <div class="guide-row">예시(Decline): <code>지폐/현금 교환이 보이지 않고 영수증 전달만 있어 CASH 아님</code></div>
+        <div class="guide-row">예시(NotDecide): <code>손 동작이 가려져 현금 교환 여부 확인 불가, drawer close-up 필요</code></div>
+      </div>
+
+      <div class="fb-grid">
+        <div class="fb-field">
+          <label for="fbDecision">Decision</label>
+          <select id="fbDecision">
+            <option value="accept">accept</option>
+            <option value="decline">decline</option>
+            <option value="unsure">not_decide (unsure)</option>
+          </select>
+          <div class="fb-help" id="fbDecisionHelp">accept는 정답으로 확정, decline/unsure는 개선 데이터로 사용됩니다.</div>
+        </div>
+
+        <div class="fb-field">
+          <label for="fbEventId">Event ID</label>
+          <input id="fbEventId" type="text" readonly />
+          <div class="fb-help">Shadow feedback 저장 키입니다.</div>
+        </div>
+
+        <div class="fb-field">
+          <label for="fbCamera">Camera</label>
+          <input id="fbCamera" type="text" readonly />
+          <div class="fb-help">해당 이벤트의 카메라 ID</div>
+        </div>
+
+        <div class="fb-field">
+          <label for="fbScenario">Scenario</label>
+          <input id="fbScenario" type="text" readonly />
+          <div class="fb-help">shadow agent 라우팅에 사용됩니다.</div>
+        </div>
+
+        <div class="fb-field full">
+          <label for="fbEventSummary">Event Summary</label>
+          <input id="fbEventSummary" type="text" readonly />
+          <div class="fb-help">현재 Gemini 판단/이유 요약입니다.</div>
+        </div>
+
+        <div class="fb-field full">
+          <label for="fbNote">Note</label>
+          <textarea id="fbNote" rows="3" placeholder="판정 근거를 구체적으로 입력하세요"></textarea>
+          <div class="fb-help" id="fbNoteHelp">최소 1문장 이상 권장. 관찰 사실을 먼저 적어주세요.</div>
+        </div>
+
+        <div class="fb-field">
+          <label for="fbErrorType">Error Type</label>
+          <select id="fbErrorType">
+            <option value="false_positive">false_positive</option>
+            <option value="false_negative">false_negative</option>
+            <option value="wrong_class">wrong_class</option>
+            <option value="weak_reason">weak_reason</option>
+            <option value="other">other</option>
+          </select>
+          <div class="fb-help" id="fbErrorTypeHelp">오류 원인 분류 (분석/튜닝용)</div>
+        </div>
+
+        <div class="fb-field">
+          <label for="fbMissedFocus">Missed Focus (comma-separated)</label>
+          <input id="fbMissedFocus" type="text" placeholder="cashier_hand, drawer_open, occlusion" />
+          <div class="fb-help" id="fbMissedFocusHelp">최대 12개. 모델이 놓친 핵심 cue를 입력</div>
+        </div>
+
+        <div class="fb-field full">
+          <label for="fbSuggestion">Suggestion</label>
+          <textarea id="fbSuggestion" rows="2" placeholder="프롬프트/정책 개선 제안 (선택)"></textarea>
+          <div class="fb-help">예: "cash는 hand-object interaction 없으면 decline 우선"</div>
+        </div>
+      </div>
+    </div>
+    <div class="modal-foot">
+      <button id="btnFbCancel" class="btn" type="button">Cancel</button>
+      <button id="btnFbSubmit" class="btn main" type="button">Submit</button>
+    </div>
+  </div>
+</div>
 {% endblock %}
 
 {% block extra_js %}
 <script>
   const rowsEl = document.getElementById("rows");
   let allEvents = [];
+
+  const ALLOWED_ERROR_TYPES = new Set([
+    "false_positive",
+    "false_negative",
+    "wrong_class",
+    "weak_reason",
+    "other",
+    "",
+  ]);
+
+  const uiState = {
+    modalOpen: false,
+    submitPending: false,
+    targetEventId: "",
+  };
 
   const esc = (s) => String(s || "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
   const fmtTs = (iso) => { try { const d = new Date(iso); return Number.isNaN(d.getTime()) ? (iso || "-") : d.toLocaleString(); } catch { return iso || "-"; } };
@@ -153,6 +279,239 @@
     const mode = String((g && (g.input_mode || g.validation_type)) || "").toLowerCase();
     if (!mode) return "-";
     return mode;
+  }
+
+  function normalizeDecision(value) {
+    const raw = String(value || "").trim().toLowerCase();
+    if (raw === "not_decide" || raw === "not-decide") return "unsure";
+    if (["accept", "decline", "unsure"].includes(raw)) return raw;
+    return "";
+  }
+
+  function feedbackFromEvent(ev) {
+    if (!ev || typeof ev !== "object") return null;
+    const sf = ev.shadow_feedback;
+    if (!sf || typeof sf !== "object") return null;
+    const decision = normalizeDecision(sf.decision);
+    if (!decision) return null;
+    return {
+      decision,
+      note: String(sf.note || ""),
+      error_type: String(sf.error_type || ""),
+      missed_focus: Array.isArray(sf.missed_focus) ? sf.missed_focus : [],
+      suggestion: String(sf.suggestion || ""),
+      at: String(sf.at || ""),
+      source: String(sf.source || ""),
+    };
+  }
+
+  function decisionPill(decision) {
+    if (decision === "accept") return '<span class="fb-pill ok">reviewed: ACCEPT</span>';
+    if (decision === "decline") return '<span class="fb-pill no">reviewed: DECLINE</span>';
+    return '<span class="fb-pill mid">reviewed: NOT_DECIDE</span>';
+  }
+
+  function findEventById(eventId) {
+    const eid = String(eventId || "").trim();
+    if (!eid) return null;
+    return allEvents.find((ev) => String(ev.event_id || "").trim() === eid) || null;
+  }
+
+  function setFbError(message) {
+    const el = document.getElementById("fbError");
+    if (!message) {
+      el.style.display = "none";
+      el.textContent = "";
+      return;
+    }
+    el.style.display = "block";
+    el.textContent = String(message);
+  }
+
+  function setFbSubmitState(isPending) {
+    uiState.submitPending = Boolean(isPending);
+    const submit = document.getElementById("btnFbSubmit");
+    const close = document.getElementById("btnFbClose");
+    const cancel = document.getElementById("btnFbCancel");
+    submit.disabled = isPending;
+    close.disabled = isPending;
+    cancel.disabled = isPending;
+    submit.textContent = isPending ? "Submitting..." : "Submit";
+  }
+
+  function updateFeedbackGuide() {
+    const decision = normalizeDecision(document.getElementById("fbDecision").value);
+    const decisionHelp = document.getElementById("fbDecisionHelp");
+    const guide = document.getElementById("fbDecisionGuide");
+    const noteHelp = document.getElementById("fbNoteHelp");
+    const noteEl = document.getElementById("fbNote");
+    const errorTypeHelp = document.getElementById("fbErrorTypeHelp");
+    const missedHelp = document.getElementById("fbMissedFocusHelp");
+
+    if (decision === "decline") {
+      guide.textContent = "Decline은 오탐/오분류 원인 분석에 직접 사용됩니다. 사실 기반으로 왜 틀렸는지 명확히 작성하세요.";
+      decisionHelp.textContent = "decline은 현재 판단이 틀렸음을 의미합니다.";
+      noteEl.placeholder = "Example: 지폐 교환이 없고 영수증 전달만 있어 CASH 이벤트가 아님.";
+      noteHelp.textContent = "권장 형식: [관찰 사실] + [오판 이유] + [기대 라벨]";
+      errorTypeHelp.textContent = "false_positive, wrong_class, weak_reason를 우선 고려하세요.";
+      missedHelp.textContent = "놓친 단서 입력 예: hand_to_hand_cash, drawer_closed";
+      return;
+    }
+
+    if (decision === "unsure") {
+      guide.textContent = "NotDecide는 근거 부족/가림/저화질 사례를 모아 shadow prompt 개선에 사용됩니다.";
+      decisionHelp.textContent = "unsure는 확정 불가 상태입니다.";
+      noteEl.placeholder = "Example: 손이 가려져 현금 전달 여부를 확인할 수 없음. 추가 프레임 필요.";
+      noteHelp.textContent = "무엇이 불명확했는지와 필요한 추가 근거를 적어주세요.";
+      errorTypeHelp.textContent = "weak_reason 또는 other가 일반적입니다.";
+      missedHelp.textContent = "추가로 보고 싶은 단서를 입력하세요. 예: drawer_open_close_sequence";
+      return;
+    }
+
+    guide.textContent = "Accept는 해당 이벤트 판단이 맞았다는 확인입니다. Note는 선택 입력입니다.";
+    decisionHelp.textContent = "accept는 shadow 기준 정답 표식입니다.";
+    noteEl.placeholder = "Optional note.";
+    noteHelp.textContent = "선택 항목. 맞다고 본 근거를 짧게 남길 수 있습니다.";
+    errorTypeHelp.textContent = "accept에서는 error_type이 참고용으로만 저장됩니다.";
+    missedHelp.textContent = "accept에서는 비워도 됩니다.";
+  }
+
+  function normalizeMissedFocus(raw) {
+    const out = [];
+    const seen = new Set();
+    String(raw || "").split(",").forEach((part) => {
+      const v = String(part || "").trim();
+      if (!v) return;
+      const item = v.slice(0, 64);
+      if (seen.has(item)) return;
+      seen.add(item);
+      out.push(item);
+    });
+    return out.slice(0, 12);
+  }
+
+  async function requestJson(method, url, body = null) {
+    const opts = { method, headers: {} };
+    if (body !== null) {
+      opts.headers["Content-Type"] = "application/json";
+      opts.body = JSON.stringify(body);
+    }
+    const res = await fetch(url, opts);
+    const data = await res.json().catch(() => ({}));
+    return { res, data };
+  }
+
+  function openModal(payload) {
+    document.getElementById("modalText").textContent = payload;
+    document.getElementById("reasonModal").classList.add("open");
+  }
+  window.openGeminiDetail = openModal;
+
+  function openFeedbackModal(eventId) {
+    const ev = findEventById(eventId);
+    if (!ev) {
+      alert("Event not found. Please refresh.");
+      return;
+    }
+
+    uiState.targetEventId = String(ev.event_id || "").trim();
+    const scenario = String(ev.event_type || ev.scenario || "").trim();
+    const g = ev.gemini || {};
+    const st = geminiState(g);
+    const reason = String(g.reason || "").trim() || (st === "skip" ? "Tier1 confident enough, Gemini not called." : "");
+
+    document.getElementById("fbEventId").value = uiState.targetEventId;
+    document.getElementById("fbCamera").value = String(ev.camera_id || "-");
+    document.getElementById("fbScenario").value = scenario || "-";
+    document.getElementById("fbEventSummary").value = `${st.toUpperCase()} | conf=${typeof g.confidence === "number" ? g.confidence.toFixed(2) : "-"} | ${shortText(reason, 120) || "no reason"}`;
+
+    const reviewed = feedbackFromEvent(ev);
+    if (reviewed) {
+      document.getElementById("fbDecision").value = reviewed.decision;
+      document.getElementById("fbNote").value = reviewed.note || "";
+      document.getElementById("fbErrorType").value = ALLOWED_ERROR_TYPES.has(reviewed.error_type) ? reviewed.error_type : "other";
+      document.getElementById("fbMissedFocus").value = Array.isArray(reviewed.missed_focus) ? reviewed.missed_focus.join(", ") : "";
+      document.getElementById("fbSuggestion").value = reviewed.suggestion || "";
+    } else {
+      document.getElementById("fbDecision").value = "decline";
+      document.getElementById("fbNote").value = "";
+      document.getElementById("fbErrorType").value = "false_positive";
+      document.getElementById("fbMissedFocus").value = "";
+      document.getElementById("fbSuggestion").value = "";
+    }
+
+    updateFeedbackGuide();
+    setFbError("");
+    setFbSubmitState(false);
+    document.getElementById("feedbackModal").classList.add("open");
+    uiState.modalOpen = true;
+  }
+  window.openFeedbackModal = openFeedbackModal;
+
+  function closeFeedbackModal() {
+    if (uiState.submitPending) return;
+    document.getElementById("feedbackModal").classList.remove("open");
+    uiState.modalOpen = false;
+    uiState.targetEventId = "";
+    setFbError("");
+  }
+
+  function buildFeedbackPayload() {
+    const eventId = String(uiState.targetEventId || "").trim();
+    const ev = findEventById(eventId) || {};
+    const scenario = String(ev.event_type || ev.scenario || "").trim().toLowerCase();
+    const cameraId = String(ev.camera_id || "").trim();
+
+    const decision = normalizeDecision(document.getElementById("fbDecision").value);
+    const note = String(document.getElementById("fbNote").value || "").trim();
+    const errorTypeRaw = String(document.getElementById("fbErrorType").value || "").trim().toLowerCase();
+    const errorType = ALLOWED_ERROR_TYPES.has(errorTypeRaw) ? errorTypeRaw : "other";
+    const missedFocus = normalizeMissedFocus(document.getElementById("fbMissedFocus").value || "");
+    const suggestion = String(document.getElementById("fbSuggestion").value || "").trim().slice(0, 400);
+
+    return {
+      event_id: eventId,
+      camera_id: cameraId,
+      scenario: scenario,
+      decision: decision,
+      note: note,
+      error_type: errorType,
+      missed_focus: missedFocus,
+      suggestion: suggestion,
+      source: "gemini_logs",
+      override: Boolean(feedbackFromEvent(ev)),
+    };
+  }
+
+  async function submitFeedback() {
+    const payload = buildFeedbackPayload();
+    if (!payload.event_id) {
+      setFbError("event_id is required.");
+      return;
+    }
+    if (!["accept", "decline", "unsure"].includes(payload.decision)) {
+      setFbError("decision must be accept, decline, or not_decide(unsure).");
+      return;
+    }
+    if ((payload.decision === "decline" || payload.decision === "unsure") && !payload.note) {
+      setFbError("decline/not_decide에는 Note를 최소 1문장 입력해 주세요.");
+      return;
+    }
+
+    try {
+      setFbSubmitState(true);
+      const { res, data } = await requestJson("POST", "/api/vlm/shadow/feedback/", payload);
+      if (!res.ok || !data.success) {
+        setFbError(`Feedback submit failed: ${data.error || res.status}`);
+        return;
+      }
+      closeFeedbackModal();
+      await loadEvents();
+    } catch (err) {
+      setFbError(`Feedback submit failed: ${String(err)}`);
+    } finally {
+      setFbSubmitState(false);
+    }
   }
 
   async function loadEvents() {
@@ -218,17 +577,12 @@
     document.getElementById("sSkip").textContent = String(s);
   }
 
-  function openModal(payload) {
-    document.getElementById("modalText").textContent = payload;
-    document.getElementById("reasonModal").classList.add("open");
-  }
-  window.openGeminiDetail = openModal;
-
   function renderTable(list) {
     if (!list.length) {
-      rowsEl.innerHTML = '<tr><td colspan="8" class="muted">No gemini logs.</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="9" class="muted">No gemini logs.</td></tr>';
       return;
     }
+
     rowsEl.innerHTML = list.map((ev) => {
       const g = ev.gemini || {};
       const st = geminiState(g);
@@ -236,11 +590,23 @@
       const reasonBtn = reason
         ? `<button class="reason-btn" type="button" onclick='openGeminiDetail(${JSON.stringify(JSON.stringify({event_id: ev.event_id, at: ev.at, camera_id: ev.camera_id, scenario: ev.event_type || ev.scenario, state: st, confidence: g.confidence, reason: reason, input_mode: g.input_mode, validation_type: g.validation_type, processing_time_ms: g.processing_time_ms, packet_summary: g.packet_summary || null}, null, 2))})'>${esc(shortText(reason, 70))}</button>`
         : '<span class="muted">-</span>';
+
       const media = [
         ev.clip_url ? `<a class="link" href="${esc(ev.clip_url)}" target="_blank">clip</a>` : "",
         ev.thumbnail_url ? `<a class="link" href="${esc(ev.thumbnail_url)}" target="_blank">thumb</a>` : "",
         g.validation_clip_url ? `<a class="link" href="${esc(g.validation_clip_url)}" target="_blank">gemini</a>` : "",
       ].filter(Boolean).join(" | ") || "-";
+
+      const reviewed = feedbackFromEvent(ev);
+      const feedbackCell = reviewed
+        ? `
+            ${decisionPill(reviewed.decision)}
+            <div class="fb-note">${esc(shortText(reviewed.note || "", 70) || "(no note)")}</div>
+            <div class="fb-note">${esc(fmtTs(reviewed.at) || "-")}</div>
+            <button class="fb-btn" type="button" onclick="openFeedbackModal('${esc(ev.event_id || "")}')">edit</button>
+          `
+        : `<button class="fb-btn" type="button" onclick="openFeedbackModal('${esc(ev.event_id || "")}')">add feedback</button>`;
+
       return `
         <tr>
           <td>${esc(fmtTs(ev.at))}</td>
@@ -250,6 +616,7 @@
           <td>${typeof g.confidence === "number" ? g.confidence.toFixed(2) : "-"}</td>
           <td>${esc(parseInputType(g, st))}</td>
           <td>${reasonBtn}</td>
+          <td>${feedbackCell}</td>
           <td>${media}</td>
         </tr>`;
     }).join("");
@@ -265,10 +632,28 @@
     document.getElementById(id).addEventListener("input", render);
     document.getElementById(id).addEventListener("change", render);
   });
+
   document.getElementById("fDate").addEventListener("change", loadEvents);
   document.getElementById("btnRefresh").addEventListener("click", loadEvents);
+
   document.getElementById("btnCloseModal").addEventListener("click", () => document.getElementById("reasonModal").classList.remove("open"));
-  document.getElementById("reasonModal").addEventListener("click", (e) => { if (e.target.id === "reasonModal") document.getElementById("reasonModal").classList.remove("open"); });
+  document.getElementById("reasonModal").addEventListener("click", (e) => {
+    if (e.target.id === "reasonModal") document.getElementById("reasonModal").classList.remove("open");
+  });
+
+  document.getElementById("btnFbClose").addEventListener("click", closeFeedbackModal);
+  document.getElementById("btnFbCancel").addEventListener("click", closeFeedbackModal);
+  document.getElementById("btnFbSubmit").addEventListener("click", submitFeedback);
+  document.getElementById("fbDecision").addEventListener("change", updateFeedbackGuide);
+  document.getElementById("feedbackModal").addEventListener("click", (e) => {
+    if (e.target.id === "feedbackModal") closeFeedbackModal();
+  });
+
+  window.addEventListener("keydown", (e) => {
+    if (e.key === "Escape" && uiState.modalOpen) {
+      closeFeedbackModal();
+    }
+  });
 
   loadEvents();
   setInterval(loadEvents, 6000);

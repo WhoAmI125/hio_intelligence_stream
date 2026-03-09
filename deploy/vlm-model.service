@@ -9,6 +9,7 @@ User=vlmapp
 Group=vlmapp
 WorkingDirectory=/home/ubuntu/hio_intelligence_stream
 Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+Environment=TZ=Asia/Seoul
 EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
 Environment=HF_HOME=/home/ubuntu/hio_intelligence_stream/models/hf
 Environment=HF_MODULES_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/modules

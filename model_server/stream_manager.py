@@ -110,6 +110,7 @@ class CameraStream:
         self._burst_duration_frames = 90
         self._in_burst = False
         self._burst_start_frame = 0
+        self._effective_buffer_fps = 0.0
 
         # Current frame for UI/overlay
         self._current_frame = None
@@ -202,26 +203,39 @@ class CameraStream:
             if not self._ring:
                 return []
 
+            latest_ts = float(self._ring[-1]["mono_ts"])
             if anchor_mono_ts is None:
-                anchor_mono_ts = self._ring[-1]["mono_ts"]
-
-            half = window_sec / 2.0
-            w_start = anchor_mono_ts - half
-            w_end = anchor_mono_ts + half
-
-            windowed = [
-                e for e in self._ring
-                if w_start <= e["mono_ts"] <= w_end
-            ]
-
-            # Fallback: rear window if symmetric window has too few frames
-            if len(windowed) < 8:
+                # Default behavior for event/validation clip: trailing window.
+                # Using symmetric windows around "latest" cuts duration in half
+                # because future frames do not exist yet.
+                anchor_mono_ts = latest_ts
                 w_start = anchor_mono_ts - window_sec
-                w_end = anchor_mono_ts + 0.5
+                w_end = anchor_mono_ts + 0.05
                 windowed = [
                     e for e in self._ring
                     if w_start <= e["mono_ts"] <= w_end
                 ]
+            else:
+                half = window_sec / 2.0
+                w_start = anchor_mono_ts - half
+                w_end = anchor_mono_ts + half
+                windowed = [
+                    e for e in self._ring
+                    if w_start <= e["mono_ts"] <= w_end
+                ]
+
+                # If anchor is near live-edge, symmetric window may be short.
+                # Fallback to trailing window to satisfy requested duration.
+                span = 0.0
+                if len(windowed) >= 2:
+                    span = float(windowed[-1]["mono_ts"]) - float(windowed[0]["mono_ts"])
+                if len(windowed) < 8 or span < (window_sec * 0.70):
+                    trail_end = min(latest_ts + 0.05, anchor_mono_ts + 0.5)
+                    trail_start = trail_end - window_sec
+                    windowed = [
+                        e for e in self._ring
+                        if trail_start <= e["mono_ts"] <= trail_end
+                    ]
 
             windowed.sort(key=lambda e: e["mono_ts"])
             return windowed
@@ -342,12 +356,16 @@ class CameraStream:
     def _update_sampling_params(self, stream_fps: float) -> None:
         """Recalculate sampling intervals based on actual stream FPS."""
         sfps = max(1.0, stream_fps)
-        self._sample_interval = max(1, int(round(sfps / self.base_fps)))
+        # Ring buffer is used for clip evidence. Keep a minimum sampling rate
+        # so exported clips are not too choppy when base_fps is very low.
+        target_buffer_fps = max(float(self.base_fps), 4.0)
+        self._sample_interval = max(1, int(round(sfps / target_buffer_fps)))
         self._burst_interval = max(1, int(round(sfps / self.burst_fps)))
         self._burst_duration_frames = max(1, int(round(sfps * self.burst_duration_sec)))
+        self._effective_buffer_fps = sfps / float(self._sample_interval)
 
         # Resize ring buffer to hold at least 24 seconds of effective frames
-        effective_fps = sfps / self._sample_interval
+        effective_fps = self._effective_buffer_fps
         new_maxlen = max(60, int(round(effective_fps * 30)))  # 30 seconds
         if new_maxlen != self._ring.maxlen:
             with self._ring_lock:
@@ -430,6 +448,7 @@ class CameraStream:
             "status": self.status,
             "stream_fps": self.stream_fps,
             "current_fps": round(self.current_fps, 1),
+            "buffer_fps_effective": round(float(self._effective_buffer_fps or 0.0), 2),
             "frames_read": self._frames_read,
             "frames_sampled": self._frames_sampled,
             "ring_buffer_size": ring_len,

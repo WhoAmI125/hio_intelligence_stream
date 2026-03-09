@@ -21,6 +21,7 @@ import os
 import time
 import threading
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -45,6 +46,82 @@ _worker_locks: dict[str, threading.Lock] = {}
 
 # Global lock to synchronize Florence-2 inference across all threads
 _inference_lock = threading.Lock()
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_DATA_ROOT = (_PROJECT_ROOT / "data").resolve()
+
+
+def _to_public_media_url(raw: Any) -> Any:
+    """Convert local clip/thumbnail file paths to browser-accessible /media URLs."""
+    if not isinstance(raw, str):
+        return raw
+    value = raw.strip()
+    if not value:
+        return value
+    if value.startswith(("http://", "https://", "/media/")):
+        return value
+
+    normalized = value.replace("\\", "/")
+    if normalized.startswith("data/"):
+        return f"/media/{normalized[len('data/'):]}"
+    if normalized.startswith("./data/"):
+        return f"/media/{normalized[len('./data/'):]}"
+    if normalized.startswith("/"):
+        marker = "/data/"
+        idx = normalized.find(marker)
+        if idx >= 0:
+            return f"/media/{normalized[idx + len(marker):]}"
+
+    try:
+        resolved = Path(value).expanduser().resolve(strict=False)
+        rel = resolved.relative_to(_DATA_ROOT)
+        return f"/media/{str(rel).replace(os.sep, '/')}"
+    except Exception:
+        return value
+
+
+def _normalize_event_media_links(event: Any) -> Any:
+    if not isinstance(event, dict):
+        return event
+    out = dict(event)
+    for key in ("clip_url", "thumbnail_url"):
+        if key in out:
+            out[key] = _to_public_media_url(out.get(key))
+    gem = out.get("gemini")
+    if isinstance(gem, dict):
+        gem_out = dict(gem)
+        if "validation_clip_url" in gem_out:
+            gem_out["validation_clip_url"] = _to_public_media_url(gem_out.get("validation_clip_url"))
+        out["gemini"] = gem_out
+    return out
+
+
+def _normalize_clip_map(values: Any) -> Any:
+    if not isinstance(values, dict):
+        return values
+    return {
+        k: _to_public_media_url(v) if isinstance(v, str) else v
+        for k, v in values.items()
+    }
+
+
+def _trim_text(value: Any, max_len: int = 280) -> str:
+    text = str(value or "").strip().replace("\n", " ")
+    if len(text) <= max_len:
+        return text
+    return text[: max_len - 3].rstrip() + "..."
+
+
+def _append_shadow_feedback_record(record: dict[str, Any]) -> None:
+    """Persist manual shadow feedback as JSONL for audit/evolution data."""
+    try:
+        persist_dir = Path(getattr(server_config, "SHADOW_PERSIST_DIR", str(_DATA_ROOT / "shadow_feedback")))
+        persist_dir.mkdir(parents=True, exist_ok=True)
+        day = datetime.now().strftime("%Y%m%d")
+        path = persist_dir / f"manual_feedback_{day}.jsonl"
+        with path.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        logger.warning(f"[VLM API] shadow feedback persist skipped: {e}")
 
 
 def _validate_rtsp_url(rtsp_url: str) -> tuple[str | None, str | None]:
@@ -100,6 +177,7 @@ def _get_or_create_state(camera_id: str) -> dict[str, Any]:
             "last_overlay_age_sec": 0.0,
             "server_start_time": None,
             "frame_count": 0,
+            "recent_inference_logs": [],
         }
     if camera_id not in _worker_locks:
         _worker_locks[camera_id] = threading.Lock()
@@ -504,16 +582,23 @@ def vlm_status(camera_id: str = "adhoc_cam"):
 
         ring_size = int(stream_stats.get("ring_buffer_size", stream_stats.get("buffer_size", 0)) or 0)
         stream_fps = float(stream_stats.get("stream_fps", stream_stats.get("fps", 0)) or 0.0)
+        buffer_fps = float(stream_stats.get("buffer_fps_effective", state["base_fps"]) or state["base_fps"])
         inference_thread_alive = bool(thread is not None and thread.is_alive())
 
         # Get buffer info
         buffers = {
             "raw_frames": ring_size,
-            "raw_buffer_sec": ring_size / max(float(state["base_fps"]), 0.1),
+            "raw_buffer_sec": ring_size / max(buffer_fps, 0.1),
             "gemini_frames": 0,
+            "buffer_fps": buffer_fps,
         }
         last_validation = state["last_validation"] if isinstance(state.get("last_validation"), dict) else {}
         last_clip_path = state["last_clip_path"] if isinstance(state.get("last_clip_path"), dict) else {}
+        if "validation_clip_url" in last_validation:
+            last_validation = dict(last_validation)
+            last_validation["validation_clip_url"] = _to_public_media_url(last_validation.get("validation_clip_url"))
+        last_clip_path = _normalize_clip_map(last_clip_path)
+        recent_events = [_normalize_event_media_links(ev) for ev in state["recent_events"][-50:]]
 
         return {
             "running": state["running"],
@@ -531,7 +616,7 @@ def vlm_status(camera_id: str = "adhoc_cam"):
             "last_vlm": state["last_vlm"],
             "last_validation": last_validation,
             "last_clip_path": last_clip_path,
-            "recent_events": state["recent_events"][-50:],
+            "recent_events": recent_events,
             "buffers": buffers,
             "audit_log_dir": str(srv.config.LOG_DIR) if hasattr(srv, "config") else "",
             "router": {
@@ -599,6 +684,7 @@ def vlm_events(limit: int = 50, date: str | None = None):
         events = srv.local_storage.list_events(date_str=date, limit=limit)
     else:
         events = []
+    events = [_normalize_event_media_links(ev) for ev in events]
 
     # Get available dates
     dates = []
@@ -610,6 +696,88 @@ def vlm_events(limit: int = 50, date: str | None = None):
         "dates": dates,
         "count": len(events),
     }
+
+
+@router.get("/inference-logs/")
+def vlm_inference_logs(camera_id: str = "adhoc_cam", limit: int = 120):
+    state = _get_or_create_state(camera_id)
+    logs = state.get("recent_inference_logs")
+    if not isinstance(logs, list):
+        logs = []
+    n = max(1, min(int(limit or 120), 1000))
+    sliced = logs[-n:]
+    normalized_logs: list[dict[str, Any]] = []
+    for row in sliced:
+        if isinstance(row, dict):
+            item = dict(row)
+        else:
+            item = {"raw": str(row)}
+        row_camera_id = str(item.get("camera_id", "")).strip()
+        if not row_camera_id:
+            item["camera_id"] = camera_id
+        elif row_camera_id != camera_id:
+            # Safety guard: this endpoint is camera-scoped, so mismatched rows are dropped.
+            continue
+        normalized_logs.append(item)
+    return {
+        "camera_id": camera_id,
+        "count": len(normalized_logs),
+        "logs": normalized_logs,
+    }
+
+
+@router.post("/lora-flourence-feedback/")
+async def vlm_lora_flourence_feedback(request: Request):
+    """
+    Florence inference feedback endpoint wired directly to LoRA collector.
+    Spelling is intentionally kept as 'flourence' to match UI contract.
+    """
+    body = await request.json()
+    srv = _get_server_modules()
+
+    if getattr(srv, "data_collector", None) is None:
+        return JSONResponse(
+            {"success": False, "error": "data_collector_not_available"},
+            status_code=503,
+        )
+
+    camera_id = str(body.get("camera_id", "")).strip()
+    scenario = str(body.get("scenario", "")).strip().lower()
+    decision = str(body.get("decision", "")).strip().lower()
+    note = str(body.get("note", "")).strip()
+    event_id = str(body.get("event_id", "")).strip()
+    if not event_id:
+        event_id = f"florence_feedback_{int(time.time() * 1000)}_{camera_id or 'unknown'}"
+
+    shared_caption = str(body.get("shared_caption", "")).strip()
+    cash_caption = str(body.get("cash_caption", "")).strip()
+    caption = cash_caption if scenario == "cash" and cash_caption else (shared_caption or cash_caption)
+    summary = body.get("summary", {})
+    if not isinstance(summary, dict):
+        summary = {}
+
+    frame = None
+    if camera_id and getattr(srv, "stream_manager", None):
+        try:
+            frame = srv.stream_manager.get_frame(camera_id)
+        except Exception:
+            frame = None
+
+    result = srv.data_collector.collect_florence_feedback(
+        event_id=event_id,
+        decision=decision,
+        note=note,
+        frame=frame,
+        caption=caption,
+        scenario=scenario,
+        camera_id=camera_id,
+        summary=summary,
+        source="LoRa_Flourence_feedback",
+    )
+
+    if not result.get("success"):
+        return JSONResponse(result, status_code=400)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -774,7 +942,150 @@ def vlm_shadow_recent(limit: int = 120):
 @router.post("/shadow/feedback/")
 async def vlm_shadow_feedback(request: Request):
     body = await request.json()
-    return {"success": True, "message": "Shadow feedback received"}
+
+    event_id = str(body.get("event_id", "")).strip()
+    if not event_id:
+        return JSONResponse({"success": False, "error": "event_id is required"}, status_code=400)
+
+    raw_decision = str(body.get("decision", "")).strip().lower()
+    if raw_decision in {"not_decide", "not-decide"}:
+        raw_decision = "unsure"
+    if raw_decision not in {"accept", "decline", "unsure"}:
+        return JSONResponse(
+            {"success": False, "error": "decision must be accept|decline|unsure"},
+            status_code=400,
+        )
+
+    note = str(body.get("note", "")).strip()
+    error_type = str(body.get("error_type", "")).strip().lower()
+    if error_type not in {"false_positive", "false_negative", "wrong_class", "weak_reason", "other", ""}:
+        error_type = "other"
+
+    missed_focus_raw = body.get("missed_focus", [])
+    missed_focus: list[str] = []
+    if isinstance(missed_focus_raw, list):
+        for x in missed_focus_raw:
+            item = str(x or "").strip()
+            if item:
+                missed_focus.append(item[:64])
+    suggestion = str(body.get("suggestion", "")).strip()[:400]
+    source = str(body.get("source", "api")).strip() or "api"
+    override = bool(body.get("override", False))
+
+    srv = _get_server_modules()
+    now_iso = datetime.now().isoformat()
+
+    # Try to locate event context from memory and local storage.
+    memory_event: dict[str, Any] | None = None
+    memory_camera_id = ""
+    for cam_id, state in _camera_states.items():
+        for ev in state.get("recent_events", []):
+            if str(ev.get("event_id", "")).strip() == event_id:
+                memory_event = ev
+                memory_camera_id = str(cam_id)
+                break
+        if memory_event is not None:
+            break
+
+    stored_event: dict[str, Any] | None = None
+    if srv.local_storage:
+        try:
+            stored_event = srv.local_storage.get_event(event_id)
+        except Exception:
+            stored_event = None
+
+    scenario = str(body.get("scenario", "")).strip().lower()
+    if not scenario and memory_event:
+        scenario = str(memory_event.get("event_type") or memory_event.get("scenario") or "").strip().lower()
+    if not scenario and stored_event:
+        scenario = str(stored_event.get("event_type") or stored_event.get("scenario") or "").strip().lower()
+
+    camera_id = str(body.get("camera_id", "")).strip()
+    if not camera_id:
+        if memory_event:
+            camera_id = str(memory_event.get("camera_id") or "").strip()
+        elif stored_event:
+            camera_id = str(stored_event.get("camera_id") or "").strip()
+    if not camera_id:
+        camera_id = memory_camera_id
+
+    feedback_obj = {
+        "decision": raw_decision,
+        "note": note,
+        "error_type": error_type,
+        "missed_focus": missed_focus[:12],
+        "suggestion": suggestion,
+        "override": override,
+        "source": source,
+        "at": now_iso,
+    }
+
+    # Persist feedback into local event JSON (if found).
+    local_saved = False
+    if stored_event is not None and srv.local_storage:
+        try:
+            stored_event["shadow_feedback"] = feedback_obj
+            srv.local_storage.save_event(event_id, stored_event)
+            local_saved = True
+        except Exception as e:
+            logger.warning(f"[VLM API] shadow feedback local save failed ({event_id}): {e}")
+
+    # Update in-memory recent event cache for active cameras.
+    memory_updated = 0
+    for state in _camera_states.values():
+        for ev in state.get("recent_events", []):
+            if str(ev.get("event_id", "")).strip() == event_id:
+                ev["shadow_feedback"] = feedback_obj
+                memory_updated += 1
+
+    # Feed feedback to scenario shadow-agent path (not main feedback API).
+    enqueued = False
+    if scenario and getattr(srv, "shadow_agents", None) and scenario in srv.shadow_agents:
+        tier1_src = memory_event or stored_event or {}
+        tier1_result = {
+            "is_detected": bool(tier1_src.get("is_detected", False)),
+            "confidence": float(tier1_src.get("confidence", 0.0) or 0.0),
+            "matched_keywords": tier1_src.get("matched_keywords", []),
+            "event_type": scenario,
+            "camera_id": camera_id,
+        }
+        shadow_event = {
+            "event_id": event_id,
+            "camera_id": camera_id,
+            "scenario": scenario,
+            "tier1_result": tier1_result,
+            "human_feedback": raw_decision,
+            "feedback_meta": feedback_obj,
+        }
+        try:
+            enqueued = bool(srv.shadow_agents[scenario].enqueue(shadow_event))
+        except Exception as e:
+            logger.warning(f"[VLM API] shadow enqueue failed ({event_id}/{scenario}): {e}")
+
+    # Always append manual feedback record for audit/training corpus.
+    _append_shadow_feedback_record(
+        {
+            "event_id": event_id,
+            "camera_id": camera_id,
+            "scenario": scenario,
+            "feedback": feedback_obj,
+            "shadow_enqueued": enqueued,
+            "local_saved": local_saved,
+            "memory_updated": memory_updated,
+            "ts": now_iso,
+        }
+    )
+
+    return {
+        "success": True,
+        "event_id": event_id,
+        "camera_id": camera_id,
+        "scenario": scenario,
+        "shadow_enqueued": enqueued,
+        "local_saved": local_saved,
+        "memory_updated": memory_updated,
+        "feedback": feedback_obj,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -904,6 +1215,33 @@ def _inference_loop(camera_id: str, run_id: int):
                 if state["frame_count"] == 1:
                     state["last_error"] = "Florence-2 not loaded. Caption analysis only."
 
+            # Keep a rolling server-side log of Florence inference results.
+            if scenario_results:
+                summary = {}
+                for name in ("cash", "fire", "violence"):
+                    r = scenario_results.get(name, {}) if isinstance(scenario_results.get(name, {}), dict) else {}
+                    summary[name] = {
+                        "is_detected": bool(r.get("is_detected", False)),
+                        "confidence": float(r.get("confidence", 0.0) or 0.0),
+                        "zone": str(r.get("zone", "full")),
+                    }
+                logs = state.get("recent_inference_logs")
+                if not isinstance(logs, list):
+                    logs = []
+                    state["recent_inference_logs"] = logs
+                logs.append({
+                    "at": datetime.now().isoformat(),
+                    "camera_id": camera_id,
+                    "frame_count": int(state.get("frame_count", 0)),
+                    "total_inference_time_ms": float(state.get("last_vlm", {}).get("total_inference_time_ms", 0.0) or 0.0),
+                    "cashier_zone_points": len(state.get("cashier_zone", []) or []),
+                    "summary": summary,
+                    "shared_caption": _trim_text(full_caption),
+                    "cash_caption": _trim_text(cash_caption),
+                })
+                if len(logs) > 400:
+                    state["recent_inference_logs"] = logs[-400:]
+
             for scenario_name, result in scenario_results.items():
                 if not result.get("is_detected"):
                     continue
@@ -921,6 +1259,7 @@ def _inference_loop(camera_id: str, run_id: int):
                     "at": datetime.now().isoformat(),
                     "event_type": scenario_name,
                     "scenario": scenario_name,
+                    "is_detected": True,
                     "confidence": result.get("confidence", 0),
                     "gemini": {
                         "state": "pending",
@@ -1027,16 +1366,18 @@ def _inference_loop(camera_id: str, run_id: int):
                                 pass
 
                         if not gemini_ok:
-                            # Skip event — false positive filter (matches vlm_pipipeline)
+                            # Keep rejected result for audit/review, but mark as not detected.
                             logger.info(
                                 f"[VLM API] Gemini REJECTED ({camera_id}): "
                                 f"{scenario_name} conf={gemini_conf:.2f} "
                                 f"reason={gemini_reason[:80]}"
                             )
+                            event["is_detected"] = False
+                            event["rejected_by_gemini"] = True
                             if not isinstance(state.get("last_validation"), dict):
                                 state["last_validation"] = {}
                             state["last_validation"][scenario_name] = dict(event["gemini"])
-                            continue  # do NOT save this event
+                            # Keep rejected events for Gemini Logs / audit visibility.
 
                     except Exception as gem_err:
                         logger.warning(
