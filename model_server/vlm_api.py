@@ -157,6 +157,7 @@ def _get_or_create_state(camera_id: str) -> dict[str, Any]:
             "rtsp_url": "",
             "camera_id": camera_id,
             "base_fps": 1.5,
+            "clip_buffer_fps": 12.0,
             "rtsp_transport": "tcp",
             "open_timeout_ms": 8000,
             "read_timeout_ms": 8000,
@@ -261,6 +262,8 @@ async def vlm_start(request: Request):
 
     # Normalize request settings first.
     req_base_fps = float(body.get("base_fps", 1.5))
+    req_clip_buffer_fps = float(body.get("clip_buffer_fps", state.get("clip_buffer_fps", 12.0)))
+    req_clip_buffer_fps = max(2.0, min(30.0, req_clip_buffer_fps))
     req_transport = body.get("rtsp_transport", "tcp")
     req_open_timeout_ms = int(body.get("open_timeout_ms", 8000))
     req_read_timeout_ms = int(body.get("read_timeout_ms", 8000))
@@ -329,6 +332,7 @@ async def vlm_start(request: Request):
         and str(state.get("rtsp_url", "")).strip() == rtsp_url
     ):
         state["base_fps"] = req_base_fps
+        state["clip_buffer_fps"] = req_clip_buffer_fps
         state["event_cooldown_sec"] = req_event_cooldown_sec
         state["clip_duration_sec"] = req_clip_duration_sec
         state["validation_clip_sec"] = req_validation_clip_sec
@@ -372,6 +376,7 @@ async def vlm_start(request: Request):
         # Update state from request
         state["rtsp_url"] = rtsp_url
         state["base_fps"] = req_base_fps
+        state["clip_buffer_fps"] = req_clip_buffer_fps
         state["rtsp_transport"] = req_transport
         state["open_timeout_ms"] = req_open_timeout_ms
         state["read_timeout_ms"] = req_read_timeout_ms
@@ -385,6 +390,7 @@ async def vlm_start(request: Request):
         stream = srv.stream_manager.add_camera(
             camera_id, rtsp_url,
             base_fps=state["base_fps"],
+            clip_buffer_fps=state["clip_buffer_fps"],
             rtsp_transport=state["rtsp_transport"],
             open_timeout_ms=state["open_timeout_ms"],
             read_timeout_ms=state["read_timeout_ms"],
@@ -546,6 +552,7 @@ def vlm_status(camera_id: str = "adhoc_cam"):
                 "current_fps": 0.0,
                 "stream_fps": 0.0,
                 "base_fps": float(state.get("base_fps", 1.5)),
+                "clip_buffer_fps": float(state.get("clip_buffer_fps", 12.0)),
                 "event_cooldown_sec": int(state.get("event_cooldown_sec", 20)),
                 "validation_clip_sec": int(state.get("validation_clip_sec", 10)),
                 "evidence_mode": str(state.get("evidence_mode", "hybrid")),
@@ -607,6 +614,7 @@ def vlm_status(camera_id: str = "adhoc_cam"):
             "current_fps": state["current_fps"],
             "stream_fps": stream_fps,
             "base_fps": state["base_fps"],
+            "clip_buffer_fps": state.get("clip_buffer_fps", 12.0),
             "event_cooldown_sec": state["event_cooldown_sec"],
             "validation_clip_sec": state["validation_clip_sec"],
             "evidence_mode": state["evidence_mode"],
@@ -654,6 +662,7 @@ def vlm_config(camera_id: str = "adhoc_cam"):
         "florence_device": config.FLORENCE_DEVICE,
         "gemini_model": config.GEMINI_MODEL,
         "base_fps": state["base_fps"],
+        "clip_buffer_fps": state.get("clip_buffer_fps", 12.0),
         "clip_duration_sec": state["clip_duration_sec"],
         "validation_clip_sec": state["validation_clip_sec"],
         "evidence_mode": state["evidence_mode"],

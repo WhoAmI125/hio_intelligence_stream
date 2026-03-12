@@ -69,6 +69,8 @@ class CameraStream:
         *,
         base_fps: float = 1.5,
         burst_fps: float = 4.0,
+        clip_buffer_fps: float = 12.0,
+        clip_buffer_burst_fps: float = 15.0,
         burst_duration_sec: float = 3.0,
         buffer_seconds: int = 30,
         rtsp_transport: str = "tcp",
@@ -80,6 +82,8 @@ class CameraStream:
         self.rtsp_url = rtsp_url
         self.base_fps = base_fps
         self.burst_fps = burst_fps
+        self.clip_buffer_fps = clip_buffer_fps
+        self.clip_buffer_burst_fps = clip_buffer_burst_fps
         self.burst_duration_sec = burst_duration_sec
         self.rtsp_transport = rtsp_transport
         self.open_timeout_ms = open_timeout_ms
@@ -107,6 +111,8 @@ class CameraStream:
         self._frame_count = 0
         self._sample_interval = 20  # recalculated after connect
         self._burst_interval = 5
+        self._clip_sample_interval = 3
+        self._clip_burst_interval = 2
         self._burst_duration_frames = 90
         self._in_burst = False
         self._burst_start_frame = 0
@@ -350,19 +356,27 @@ class CameraStream:
 
     def _should_sample(self) -> bool:
         """Decide whether current frame should be sampled into the ring buffer."""
-        interval = self._burst_interval if self._in_burst else self._sample_interval
+        # Ring buffer sampling is decoupled from inference base_fps.
+        interval = self._clip_burst_interval if self._in_burst else self._clip_sample_interval
         return (self._frame_count % interval) == 0
 
     def _update_sampling_params(self, stream_fps: float) -> None:
         """Recalculate sampling intervals based on actual stream FPS."""
-        sfps = max(1.0, stream_fps)
-        # Ring buffer is used for clip evidence. Keep a minimum sampling rate
-        # so exported clips are not too choppy when base_fps is very low.
-        target_buffer_fps = max(float(self.base_fps), 4.0)
-        self._sample_interval = max(1, int(round(sfps / target_buffer_fps)))
-        self._burst_interval = max(1, int(round(sfps / self.burst_fps)))
+        sfps = max(1.0, float(stream_fps or 30.0))
+
+        # Inference cadence (kept for compatibility/telemetry)
+        inf_base = max(0.5, float(self.base_fps or 1.5))
+        inf_burst = max(inf_base, float(self.burst_fps or 4.0))
+        self._sample_interval = max(1, int(round(sfps / inf_base)))
+        self._burst_interval = max(1, int(round(sfps / inf_burst)))
+
+        # Clip buffer cadence: stable higher-fps ring for smoother clips
+        clip_base = max(2.0, min(30.0, float(self.clip_buffer_fps or 12.0)))
+        clip_burst = max(clip_base, min(30.0, float(self.clip_buffer_burst_fps or 15.0)))
+        self._clip_sample_interval = max(1, int(round(sfps / clip_base)))
+        self._clip_burst_interval = max(1, int(round(sfps / clip_burst)))
         self._burst_duration_frames = max(1, int(round(sfps * self.burst_duration_sec)))
-        self._effective_buffer_fps = sfps / float(self._sample_interval)
+        self._effective_buffer_fps = sfps / float(self._clip_sample_interval)
 
         # Resize ring buffer to hold at least 24 seconds of effective frames
         effective_fps = self._effective_buffer_fps
@@ -449,6 +463,8 @@ class CameraStream:
             "stream_fps": self.stream_fps,
             "current_fps": round(self.current_fps, 1),
             "buffer_fps_effective": round(float(self._effective_buffer_fps or 0.0), 2),
+            "clip_buffer_fps_config": float(self.clip_buffer_fps or 0.0),
+            "clip_buffer_burst_fps_config": float(self.clip_buffer_burst_fps or 0.0),
             "frames_read": self._frames_read,
             "frames_sampled": self._frames_sampled,
             "ring_buffer_size": ring_len,
@@ -496,6 +512,8 @@ class StreamManager:
             rtsp_url=rtsp_url,
             base_fps=config.get("base_fps", 1.5),
             burst_fps=config.get("burst_fps", 4.0),
+            clip_buffer_fps=config.get("clip_buffer_fps", 12.0),
+            clip_buffer_burst_fps=config.get("clip_buffer_burst_fps", 15.0),
             burst_duration_sec=config.get("burst_duration_sec", 3.0),
             buffer_seconds=config.get("buffer_seconds", 30),
             rtsp_transport=config.get("rtsp_transport", "tcp"),

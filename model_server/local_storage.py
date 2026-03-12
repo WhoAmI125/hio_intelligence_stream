@@ -237,6 +237,11 @@ class LocalStorage:
         """
         if not frames:
             return None
+        try:
+            fps = float(fps or 15.0)
+        except Exception:
+            fps = 15.0
+        fps = max(1.0, min(60.0, fps))
 
         date_str = datetime.now().strftime("%Y%m%d")
         day_dir = self.clips_dir / date_str
@@ -275,7 +280,7 @@ class LocalStorage:
                         "-movflags",
                         "+faststart",
                         "-r",
-                        str(int(fps)),
+                        f"{fps:.3f}",
                         str(final_path),
                     ],
                     capture_output=True,
@@ -285,7 +290,7 @@ class LocalStorage:
                     ffmpeg_ok = True
                     logger.info(
                         f"[LocalStorage] FFmpeg converted clip: {final_path} "
-                        f"({len(frames)} frames, {len(frames)/fps:.1f}s)"
+                        f"({len(frames)} frames, {len(frames)/max(fps, 0.1):.1f}s)"
                     )
                 else:
                     stderr_txt = (result.stderr or b"").decode(errors="ignore")
@@ -322,7 +327,7 @@ class LocalStorage:
                     return None
                 logger.info(
                     f"[LocalStorage] Fallback clip saved: {final_path} "
-                    f"({len(frames)} frames, {len(frames)/fps:.1f}s)"
+                    f"({len(frames)} frames, {len(frames)/max(fps, 0.1):.1f}s)"
                 )
 
             # Step 4: Optional S3 upload
