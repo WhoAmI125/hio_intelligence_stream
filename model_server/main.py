@@ -368,6 +368,9 @@ async def lifespan(app: FastAPI):
             "backend": config.FLORENCE_BACKEND,
             "device": config.FLORENCE_DEVICE,
             "input_size": (config.FLORENCE_INPUT_SIZE, config.FLORENCE_INPUT_SIZE),
+            "max_tokens": config.FLORENCE_MAX_TOKENS,
+            "num_beams": config.FLORENCE_NUM_BEAMS,
+            "caption_detail": config.FLORENCE_CAPTION_DETAIL,
             "cache_dir": str(config.MODELS_DIR),
             "lora_enabled": config.LORA_ENABLED,
             "lora_adapter_path": config.LORA_ADAPTER_PATH,
@@ -389,10 +392,23 @@ async def lifespan(app: FastAPI):
             config=OrchestratorConfig(
                 detect_cash=True,
                 detect_violence=True,
-                detect_fire=True
+                detect_fire=True,
+                cash_threshold=config.CASH_THRESHOLD,
+                violence_threshold=config.VIOLENCE_THRESHOLD,
+                fire_threshold=config.FIRE_THRESHOLD,
+                cash_dual_path_enabled=config.CASH_DUAL_PATH_ENABLED,
+                cash_roi_infer_enabled=config.CASH_ROI_INFER_ENABLED,
             )
         )
-        logger.info("PipelineOrchestrator initialized.")
+        logger.info(
+            "PipelineOrchestrator initialized with thresholds "
+            "(cash=%.2f, violence=%.2f, fire=%.2f), cash_dual_path=%s, cash_roi_infer=%s.",
+            config.CASH_THRESHOLD,
+            config.VIOLENCE_THRESHOLD,
+            config.FIRE_THRESHOLD,
+            str(bool(config.CASH_DUAL_PATH_ENABLED)).lower(),
+            str(bool(config.CASH_ROI_INFER_ENABLED)).lower(),
+        )
     except Exception as e:
         logger.warning(f"Florence-2 / Orchestrator not loaded (will work without GPU): {e}")
         florence_adapter = None
@@ -401,8 +417,23 @@ async def lifespan(app: FastAPI):
     # Determine router configurations
     try:
         from model_server.evidence_router import EvidenceRouter
-        evidence_router = EvidenceRouter()
-        logger.info("EvidenceRouter initialized.")
+        evidence_router = EvidenceRouter({
+            "fire_conf_tier2": config.TIER2_FIRE_THRESHOLD,
+            "violence_conf_tier2": config.TIER2_VIOLENCE_THRESHOLD,
+            "cash_conf_tier2": config.TIER2_CASH_THRESHOLD,
+            "skip_confidence": config.SKIP_CONFIDENCE,
+            "skip_stability": config.SKIP_STABILITY,
+        })
+        logger.info(
+            "EvidenceRouter initialized with Tier2 thresholds "
+            "(fire=%.2f, violence=%.2f, cash=%.2f) and skip gate "
+            "(conf=%.2f, stability=%.2f).",
+            config.TIER2_FIRE_THRESHOLD,
+            config.TIER2_VIOLENCE_THRESHOLD,
+            config.TIER2_CASH_THRESHOLD,
+            config.SKIP_CONFIDENCE,
+            config.SKIP_STABILITY,
+        )
     except Exception as e:
         logger.warning(f"EvidenceRouter init failed: {e}")
         evidence_router = None

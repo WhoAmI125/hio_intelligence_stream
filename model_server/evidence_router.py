@@ -214,6 +214,8 @@ class EvidenceRouter:
             'violence': self.config.get('violence_conf_tier2', self.DEFAULT_THRESHOLDS['violence']),
             'cash': self.config.get('cash_conf_tier2', self.DEFAULT_THRESHOLDS['cash']),
         }
+        self.skip_confidence = float(self.config.get('skip_confidence', 0.85))
+        self.skip_stability = float(self.config.get('skip_stability', 0.90))
 
         self.stability_threshold = float(self.config.get('stability_threshold', 0.6))
         self.max_keyframes = int(self.config.get('max_keyframes', 12))
@@ -604,7 +606,7 @@ class EvidenceRouter:
                 q_human += 0.30
 
         # Very stable/high confidence episodes should bias toward SKIP
-        if avg_conf > 0.92 and stability > 0.92:
+        if avg_conf >= self.skip_confidence and stability >= self.skip_stability:
             q_skip += 0.35
 
         # Cost penalty
@@ -1108,21 +1110,39 @@ class EvidenceRouter:
 
         event_type = state['event_type']
         avg_conf = state['avg_conf']
+        stability = state['stability']
+        force_tier2 = False
         baseline_reason = ""
+        scenario_threshold = float(self.thresholds.get(event_type, 0.55))
 
         # Hard risk rule
         if event_type in self.hard_tier2_events and avg_conf < self.hard_tier2_max_conf:
             action = self.ACTION_GEMINI_VIDEO
+            force_tier2 = True
             baseline_reason = (
                 f'Hard-risk escalation for {event_type}: '
                 f'conf={avg_conf:.2f} < {self.hard_tier2_max_conf:.2f}'
+            )
+        elif avg_conf < scenario_threshold:
+            action = self.ACTION_GEMINI_VIDEO
+            force_tier2 = True
+            baseline_reason = (
+                f'Below Tier2 threshold for {event_type}: '
+                f'conf={avg_conf:.2f} < {scenario_threshold:.2f}'
+            )
+        elif avg_conf >= self.skip_confidence and stability >= self.skip_stability:
+            action = self.ACTION_SKIP
+            baseline_reason = (
+                f'High confidence/stability skip: '
+                f'conf={avg_conf:.2f}>= {self.skip_confidence:.2f}, '
+                f'stab={stability:.2f}>= {self.skip_stability:.2f}'
             )
         else:
             action = max(self.ACTIONS, key=lambda x: q.get(x, -9999.0))
             baseline_reason = f'max_q_action[{q_source}]'
 
         # Margin gate to suppress unnecessary Gemini calls
-        if action in self.TIER2_ACTIONS:
+        if action in self.TIER2_ACTIONS and not force_tier2:
             margin = q.get(action, 0.0) - q.get(self.ACTION_SKIP, 0.0)
             if margin < self.router_margin and event_type not in self.hard_tier2_events:
                 action = self.ACTION_SKIP
@@ -1745,6 +1765,8 @@ class EvidenceRouter:
             'routed_by_type': self.routed_by_type,
             'pending_queue_size': len(self.pending_queue),
             'thresholds': self.thresholds,
+            'skip_confidence': self.skip_confidence,
+            'skip_stability': self.skip_stability,
             'total_decisions': self.total_decisions,
             'action_counts': self.action_counts,
             'gemini_ratio': round(self._gemini_ratio(), 4),

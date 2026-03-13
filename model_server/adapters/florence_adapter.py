@@ -59,8 +59,16 @@ class FlorenceAdapter(BaseVLMAdapter):
         self.text_decoder = None
         self.tokenizer = None
 
-        # Task prefix for Florence-2
-        self.task_prefix = "<DETAILED_CAPTION>"  # or <MORE_DETAILED_CAPTION>
+        # Caption task profile for Florence-2.
+        detail = str(self.config.get('caption_detail', 'more')).strip().lower()
+        task_map = {
+            'basic': '<CAPTION>',
+            'caption': '<CAPTION>',
+            'detailed': '<DETAILED_CAPTION>',
+            'more': '<MORE_DETAILED_CAPTION>',
+        }
+        self.caption_task = task_map.get(detail, '<MORE_DETAILED_CAPTION>')
+        self.num_beams = max(1, int(self.config.get('num_beams', 3)))
 
     def initialize(self) -> bool:
         """
@@ -345,7 +353,9 @@ class FlorenceAdapter(BaseVLMAdapter):
         inputs = {k: v.to(device) for k, v in inputs.items()}
 
         max_new_tokens = kwargs.get('max_new_tokens', self.max_tokens)
-        num_beams = kwargs.get('num_beams', 3)
+        num_beams = int(kwargs.get('num_beams', self.num_beams))
+        if num_beams < 1:
+            num_beams = 1
 
         device_type = device.type
         # CUDA: use autocast for speed/memory; CPU: keep default.
@@ -390,14 +400,14 @@ class FlorenceAdapter(BaseVLMAdapter):
         Run inference with PyTorch backend.
 
         Strategy for scenario detection:
-        1. Generate detailed caption (<MORE_DETAILED_CAPTION>)
+        1. Generate caption (task is configurable by caption_detail)
         2. Return caption text for scenario keyword matching
         """
-        # Generate detailed scene description
-        result = self._run_task(image, "<MORE_DETAILED_CAPTION>", **kwargs)
+        # Generate scene description using configured caption detail.
+        result = self._run_task(image, self.caption_task, **kwargs)
 
         # Extract caption text
-        caption = result.get("<MORE_DETAILED_CAPTION>", "")
+        caption = result.get(self.caption_task, "")
         if not caption:
             # Fallback
             caption = str(result)

@@ -59,6 +59,7 @@ class OrchestratorConfig:
     # Cash-specific routing helpers
     cash_dual_path_enabled: bool = True
     cash_global_assist_threshold: float = 0.30
+    cash_roi_infer_enabled: bool = True
 
 
 @dataclass
@@ -242,7 +243,11 @@ class ScenarioOrchestrator:
 
         for name, scenario in self.scenarios.items():
             # Determine which frame/crop to use
-            if name == 'cash' and zones.get('cashier'):
+            if (
+                name == 'cash'
+                and zones.get('cashier')
+                and bool(self.config.cash_roi_infer_enabled)
+            ):
                 # Crop to cashier zone for cash detection
                 cropped, bbox = self.vlm.crop_zone(frame, zones['cashier'])
                 input_frame = cropped
@@ -510,7 +515,11 @@ class ScenarioOrchestrator:
         results = {}
         for inp in scenario_inputs:
             # For cash with cashier zone: generate separate cropped caption
-            if inp['scenario_name'] == 'cash' and effective_zones.get('cashier'):
+            if (
+                inp['scenario_name'] == 'cash'
+                and effective_zones.get('cashier')
+                and bool(self.config.cash_roi_infer_enabled)
+            ):
                 cropped_caption = self.vlm.infer(inp['frame'], "")
                 result = self._run_single_scenario(
                     inp['scenario'], inp['frame'],
@@ -558,7 +567,11 @@ class ScenarioOrchestrator:
             total_inference_time_ms=total_time,
             frame_timestamp=datetime.now(),
             in_burst_mode=self.config.in_burst_mode,
-            metadata={'caption_ms': caption_ms, 'shared_caption': shared_caption[:200]}
+            metadata={
+                'caption_ms': caption_ms,
+                'shared_caption': shared_caption,
+                'shared_caption_preview': shared_caption[:200],
+            }
         )
 
     def set_burst_mode(self, enabled: bool):

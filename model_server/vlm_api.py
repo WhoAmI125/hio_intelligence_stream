@@ -20,6 +20,7 @@ import logging
 import os
 import time
 import threading
+from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -44,7 +45,7 @@ _camera_states: dict[str, dict[str, Any]] = {}
 _inference_threads: dict[str, threading.Thread] = {}
 _worker_locks: dict[str, threading.Lock] = {}
 
-# Global lock to synchronize Florence-2 inference across all threads
+# Optional global lock to serialize Florence-2 inference across all camera threads
 _inference_lock = threading.Lock()
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_ROOT = (_PROJECT_ROOT / "data").resolve()
@@ -259,6 +260,32 @@ async def vlm_start(request: Request):
     camera_id = body.get("camera_id", "adhoc_cam")
     state = _get_or_create_state(camera_id)
     worker_lock = _worker_locks[camera_id]
+
+    # Optional compatibility mode: keep only one active camera inference loop.
+    if bool(getattr(server_config, "SINGLE_CAMERA_MODE", False)):
+        stopped_cameras: list[str] = []
+        for other_camera_id in list(_camera_states.keys()):
+            if str(other_camera_id) == str(camera_id):
+                continue
+            other_state = _camera_states.get(other_camera_id) or {}
+            other_thread = _inference_threads.get(other_camera_id)
+            other_running = bool(other_state.get("running"))
+            other_alive = bool(other_thread is not None and other_thread.is_alive())
+            if not other_running and not other_alive:
+                continue
+            try:
+                await vlm_stop(camera_id=str(other_camera_id))
+                stopped_cameras.append(str(other_camera_id))
+            except Exception as stop_err:
+                logger.warning(
+                    f"[VLM API] SINGLE_CAMERA_MODE stop failed for {other_camera_id}: {stop_err}"
+                )
+        if stopped_cameras:
+            logger.info(
+                "[VLM API] SINGLE_CAMERA_MODE active: stopped cameras=%s before start(%s)",
+                ",".join(stopped_cameras),
+                camera_id,
+            )
 
     # Normalize request settings first.
     req_base_fps = float(body.get("base_fps", 1.5))
@@ -1151,7 +1178,12 @@ def _inference_loop(camera_id: str, run_id: int):
                         "cashier": state.get("cashier_zone", []),
                         "drawer": state.get("drawer_zone", [])
                     }
-                    with _inference_lock:
+                    inference_ctx = (
+                        _inference_lock
+                        if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
+                        else nullcontext()
+                    )
+                    with inference_ctx:
                         orch_result = srv.pipeline_orchestrator.process_frame_sequential(frame, zones=zones)
                     
                     scenario_results = {name: sr.to_dict() for name, sr in orch_result.scenario_results.items()}
@@ -1172,7 +1204,12 @@ def _inference_loop(camera_id: str, run_id: int):
             elif getattr(srv, "florence_adapter", None) is not None:
                 # Fallback purely to avoid breaking completely if orchestrator failed init
                 try:
-                    with _inference_lock:
+                    inference_ctx = (
+                        _inference_lock
+                        if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
+                        else nullcontext()
+                    )
+                    with inference_ctx:
                         full_caption = srv.florence_adapter.infer(frame, "")
                         cash_caption = full_caption
                         cashier_zone = state.get("cashier_zone", []) or []

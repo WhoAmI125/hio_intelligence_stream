@@ -76,6 +76,9 @@ FLORENCE_BACKEND = os.getenv("FLORENCE_BACKEND", "pytorch")  # pytorch | openvin
 FLORENCE_DEVICE = os.getenv("FLORENCE_DEVICE", "cuda")       # auto | cpu | cuda
 FLORENCE_INPUT_SIZE = _env_int("FLORENCE_INPUT_SIZE", 448)
 FLORENCE_DTYPE = os.getenv("FLORENCE_DTYPE", "float32")      # float32 | float16
+FLORENCE_MAX_TOKENS = _env_int("FLORENCE_MAX_TOKENS", 512)
+FLORENCE_NUM_BEAMS = _env_int("FLORENCE_NUM_BEAMS", 3)
+FLORENCE_CAPTION_DETAIL = os.getenv("FLORENCE_CAPTION_DETAIL", "more").strip().lower()
 
 # ---------------------------------------------------------------------------
 # Gemini (Tier 2)
@@ -94,6 +97,8 @@ GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 30.0)
 CASH_THRESHOLD = _env_float("CASH_THRESHOLD", 0.30)
 VIOLENCE_THRESHOLD = _env_float("VIOLENCE_THRESHOLD", 0.30)
 FIRE_THRESHOLD = _env_float("FIRE_THRESHOLD", 0.30)
+CASH_DUAL_PATH_ENABLED = _env_bool("CASH_DUAL_PATH_ENABLED", True)
+CASH_ROI_INFER_ENABLED = _env_bool("CASH_ROI_INFER_ENABLED", True)
 
 # Uncertainty Gate — tier2 escalation thresholds
 TIER2_FIRE_THRESHOLD = _env_float("TIER2_FIRE_THRESHOLD", 0.60)
@@ -111,6 +116,8 @@ SKIP_STABILITY = _env_float("SKIP_STABILITY", 0.90)
 BASE_FPS = _env_float("BASE_FPS", 1.5)
 BURST_FPS = _env_float("BURST_FPS", 4.0)
 BURST_DURATION_SEC = _env_float("BURST_DURATION_SEC", 3.0)
+SINGLE_CAMERA_MODE = _env_bool("SINGLE_CAMERA_MODE", False)
+GLOBAL_INFERENCE_LOCK = _env_bool("GLOBAL_INFERENCE_LOCK", True)
 RTSP_TRANSPORT = os.getenv("RTSP_TRANSPORT", "tcp")
 RTSP_OPEN_TIMEOUT_MS = _env_int("RTSP_OPEN_TIMEOUT_MS", 8000)
 RTSP_READ_TIMEOUT_MS = _env_int("RTSP_READ_TIMEOUT_MS", 8000)
