@@ -89,6 +89,7 @@ GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
 GEMINI_TEMPERATURE = _env_float("GEMINI_TEMPERATURE", 0.1)
 GEMINI_MAX_OUTPUT_TOKENS = _env_int("GEMINI_MAX_OUTPUT_TOKENS", 1500)
 GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 30.0)
+GEMINI_MAX_CONCURRENT = _env_int("GEMINI_MAX_CONCURRENT", 1)
 
 # ---------------------------------------------------------------------------
 # Detection Thresholds
@@ -118,9 +119,17 @@ BURST_FPS = _env_float("BURST_FPS", 4.0)
 BURST_DURATION_SEC = _env_float("BURST_DURATION_SEC", 3.0)
 SINGLE_CAMERA_MODE = _env_bool("SINGLE_CAMERA_MODE", False)
 GLOBAL_INFERENCE_LOCK = _env_bool("GLOBAL_INFERENCE_LOCK", True)
+INFERENCE_WORKERS = _env_int("INFERENCE_WORKERS", 1)
+INFERENCE_QUEUE_SIZE = _env_int("INFERENCE_QUEUE_SIZE", 128)
+INFERENCE_ACTIVE_BURST_SEC = _env_float("INFERENCE_ACTIVE_BURST_SEC", 3.0)
+INFERENCE_ACTIVE_BURST_FPS = _env_float("INFERENCE_ACTIVE_BURST_FPS", 3.0)
 RTSP_TRANSPORT = os.getenv("RTSP_TRANSPORT", "tcp")
 RTSP_OPEN_TIMEOUT_MS = _env_int("RTSP_OPEN_TIMEOUT_MS", 8000)
 RTSP_READ_TIMEOUT_MS = _env_int("RTSP_READ_TIMEOUT_MS", 8000)
+RTSP_HWACCEL = os.getenv("RTSP_HWACCEL", "none").strip().lower()
+RTSP_HWACCEL_DEVICE = os.getenv("RTSP_HWACCEL_DEVICE", "0").strip()
+RTSP_HWACCEL_DECODER = os.getenv("RTSP_HWACCEL_DECODER", "").strip()
+RTSP_HWACCEL_ALLOW_FALLBACK = _env_bool("RTSP_HWACCEL_ALLOW_FALLBACK", True)
 STALE_THRESHOLD_SEC = _env_float("STALE_THRESHOLD_SEC", 2.5)
 CLIP_BUFFER_SECONDS = _env_int("CLIP_BUFFER_SECONDS", 30)
 
@@ -140,7 +149,7 @@ EPISODE_MAX_PER_TYPE = _env_int("EPISODE_MAX_PER_TYPE", 3)
 GEMINI_TARGET_RATIO = _env_float("GEMINI_TARGET_RATIO", 0.30)
 GEMINI_RATIO_PENALTY = _env_float("GEMINI_RATIO_PENALTY", 0.25)
 VIDEO_CLIP_SECONDS = _env_int("VIDEO_CLIP_SECONDS", 10)
-EVIDENCE_MODE = os.getenv("EVIDENCE_MODE", "hybrid")
+EVIDENCE_MODE = os.getenv("EVIDENCE_MODE", "video_only")
 
 # ---------------------------------------------------------------------------
 # Critic / Evolution
@@ -182,6 +191,14 @@ DB_SERVER_URL = os.getenv("DB_SERVER_URL", "http://localhost:8001")
 FLUSH_ENDPOINT = os.getenv("FLUSH_ENDPOINT", "/api/flush")
 FLUSH_INTERVAL_SEC = _env_int("FLUSH_INTERVAL_SEC", 3600)
 FLUSH_MAX_RETRIES = _env_int("FLUSH_MAX_RETRIES", 3)
+LOCAL_RETENTION_DAYS = _env_int("LOCAL_RETENTION_DAYS", 3)
+
+# ---------------------------------------------------------------------------
+# Florence Inference Logging
+# ---------------------------------------------------------------------------
+
+FLORENCE_LOG_PERSIST = _env_bool("FLORENCE_LOG_PERSIST", True)
+FLORENCE_LOG_DIR = Path(os.getenv("FLORENCE_LOG_DIR", str(DATA_DIR / "florence_logs")))
 
 # ---------------------------------------------------------------------------
 # Media Export / Storage
@@ -194,6 +211,9 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 AWS_REGION = os.getenv("AWS_REGION", "ap-northeast-2")
 AWS_STORAGE_BUCKET_NAME = os.getenv("AWS_STORAGE_BUCKET_NAME", "")
 FFMPEG_PATH = os.getenv("FFMPEG_PATH", "ffmpeg")
+CLIP_SAVE_MAX_CONCURRENT = _env_int("CLIP_SAVE_MAX_CONCURRENT", 1)
+POSTPROCESS_WORKERS = _env_int("POSTPROCESS_WORKERS", 1)
+POSTPROCESS_QUEUE_SIZE = _env_int("POSTPROCESS_QUEUE_SIZE", 128)
 
 # ---------------------------------------------------------------------------
 # Router Steps (append-only JSONL for critic training)

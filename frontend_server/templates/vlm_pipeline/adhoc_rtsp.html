@@ -638,7 +638,7 @@
       event_cooldown_sec: Number(cam.event_cooldown_sec || 20),
       clip_duration_sec: Number(cam.clip_duration_sec || 10),
       validation_clip_sec: Number(cam.validation_clip_sec || 10),
-      evidence_mode: String(cam.evidence_mode || "hybrid"),
+      evidence_mode: String(cam.evidence_mode || "video_only"),
       use_video_validation: cam.use_video_validation !== false,
     };
   }
@@ -822,7 +822,7 @@
     sCooldown.value = String(cfg.event_cooldown_sec ?? 20);
     sClipSec.value = String(cfg.clip_duration_sec ?? 10);
     sValidationSec.value = String(cfg.validation_clip_sec ?? 10);
-    sEvidenceMode.value = cfg.evidence_mode || "hybrid";
+    sEvidenceMode.value = cfg.evidence_mode || "video_only";
 
     loadZonesIntoEditor(camId);
     bindSettingsStatus(statusCache[camId] || null);

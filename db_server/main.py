@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import urlparse
 
-from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
+from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -140,7 +140,7 @@ def init_db():
             event_cooldown_sec INTEGER DEFAULT 20,
             clip_duration_sec INTEGER DEFAULT 10,
             validation_clip_sec INTEGER DEFAULT 10,
-            evidence_mode TEXT DEFAULT 'hybrid',
+            evidence_mode TEXT DEFAULT 'video_only',
             use_video_validation INTEGER DEFAULT 1,
             cashier_zone TEXT DEFAULT '[]',
             drawer_zone TEXT DEFAULT '[]',
@@ -206,7 +206,7 @@ class CameraConfigRequest(BaseModel):
     event_cooldown_sec: int = 20
     clip_duration_sec: int = 10
     validation_clip_sec: int = 10
-    evidence_mode: str = "hybrid"
+    evidence_mode: str = "video_only"
     use_video_validation: bool = True
     cashier_zone: list[list[float]] = []
     drawer_zone: list[list[float]] = []
@@ -267,7 +267,7 @@ def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "event_cooldown_sec": int(row["event_cooldown_sec"] or 20),
         "clip_duration_sec": int(row["clip_duration_sec"] or 10),
         "validation_clip_sec": int(row["validation_clip_sec"] or 10),
-        "evidence_mode": row["evidence_mode"] or "hybrid",
+        "evidence_mode": row["evidence_mode"] or "video_only",
         "use_video_validation": bool(row["use_video_validation"]),
         "cashier_zone": cashier_zone,
         "drawer_zone": drawer_zone,
@@ -329,7 +329,7 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
         "event_cooldown_sec": int(req.event_cooldown_sec or 20),
         "clip_duration_sec": int(req.clip_duration_sec or 10),
         "validation_clip_sec": int(req.validation_clip_sec or 10),
-        "evidence_mode": (str(req.evidence_mode or "hybrid").strip() or "hybrid"),
+        "evidence_mode": (str(req.evidence_mode or "video_only").strip() or "video_only"),
         "use_video_validation": 1 if req.use_video_validation else 0,
         "cashier_zone": json.dumps(_normalize_zone_points(req.cashier_zone), ensure_ascii=False),
         "drawer_zone": json.dumps(_normalize_zone_points(req.drawer_zone), ensure_ascii=False),
@@ -417,26 +417,58 @@ def delete_camera(camera_id: str):
 
 
 @app.post("/api/flush")
-async def flush_events(
-    metadata: Annotated[str, Form()],
-    video_clip: UploadFile | None = File(None),
-):
+async def flush_events(request: Request):
     """
     Receive batched events from model_server's FlushWorker.
-    Accepts JSON metadata and optional video clip.
+    Accepts JSON metadata and optional clip files.
     """
+    form = await request.form()
+
+    metadata_raw = form.get("metadata")
+    if isinstance(metadata_raw, UploadFile):
+        metadata = (await metadata_raw.read()).decode("utf-8", errors="replace")
+    else:
+        metadata = str(metadata_raw or "")
+
+    if not metadata.strip():
+        raise HTTPException(status_code=400, detail="metadata is required")
+
     try:
         payload = json.loads(metadata)
     except json.JSONDecodeError:
         return {"status": "error", "message": "Invalid JSON metadata"}
 
     events = payload.get("events", [])
+    uploaded_clip_paths: dict[str, str] = {}
+
+    for key in form.keys():
+        if key == "metadata":
+            continue
+        for item in form.getlist(key):
+            if not isinstance(item, UploadFile):
+                continue
+            if not item.filename:
+                continue
+            ext = os.path.splitext(item.filename)[1] or ".mp4"
+            clip_dir = os.path.join(MEDIA_ROOT, datetime.now().strftime("%Y%m%d"))
+            os.makedirs(clip_dir, exist_ok=True)
+            event_key = Path(item.filename).stem
+            save_path = os.path.join(clip_dir, f"{event_key}{ext}")
+            with open(save_path, "wb") as f:
+                content = await item.read()
+                f.write(content)
+            uploaded_clip_paths[event_key] = save_path
+
     conn = get_db()
     inserted = 0
 
     for ev in events:
         try:
             event_id = ev.get("event_id", f"ev_{int(time.time()*1000)}")
+            clip_path_for_event = uploaded_clip_paths.get(
+                str(event_id),
+                ev.get("clip_url", ev.get("clip_path", "")),
+            )
             gem = ev.get("gemini", {}) if isinstance(ev.get("gemini", {}), dict) else {}
             gem_valid = gem.get("validated", None)
             gem_valid_i = None
@@ -465,7 +497,7 @@ async def flush_events(
                 ev.get("caption", ""),
                 json.dumps(ev.get("matched_keywords", []), ensure_ascii=False),
                 ev.get("evidence", ""),
-                ev.get("clip_url", ev.get("clip_path", "")),
+                clip_path_for_event,
                 (
                     json.dumps(ev.get("human_feedback"), ensure_ascii=False, default=str)
                     if ev.get("human_feedback") is not None
@@ -503,19 +535,18 @@ async def flush_events(
     conn.commit()
     conn.close()
 
-    # Save video clip if provided
-    clip_path = ""
-    if video_clip:
-        ext = os.path.splitext(video_clip.filename or ".mp4")[1]
-        clip_dir = os.path.join(MEDIA_ROOT, datetime.now().strftime("%Y%m%d"))
-        os.makedirs(clip_dir, exist_ok=True)
-        clip_path = os.path.join(clip_dir, f"clip_{int(time.time())}{ext}")
-        with open(clip_path, "wb") as f:
-            content = await video_clip.read()
-            f.write(content)
-
-    logger.info(f"Flush received: {inserted}/{len(events)} events, clip={clip_path or 'none'}")
-    return {"status": "ok", "inserted": inserted, "total": len(events)}
+    logger.info(
+        "Flush received: %s/%s events, uploaded_clips=%s",
+        inserted,
+        len(events),
+        len(uploaded_clip_paths),
+    )
+    return {
+        "status": "ok",
+        "inserted": inserted,
+        "total": len(events),
+        "uploaded_clips": len(uploaded_clip_paths),
+    }
 
 
 @app.get("/api/events")

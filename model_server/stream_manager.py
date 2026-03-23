@@ -25,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
+_opencv_ffmpeg_env_lock = threading.Lock()
 
 
 def _rtsp_key(rtsp_url: str) -> str:
@@ -76,6 +77,10 @@ class CameraStream:
         rtsp_transport: str = "tcp",
         open_timeout_ms: int = 8000,
         read_timeout_ms: int = 8000,
+        rtsp_hwaccel: str = "none",
+        rtsp_hwaccel_device: str = "0",
+        rtsp_hwaccel_decoder: str = "",
+        rtsp_hwaccel_allow_fallback: bool = True,
         stale_threshold_sec: float = 2.5,
     ):
         self.camera_id = camera_id
@@ -88,6 +93,10 @@ class CameraStream:
         self.rtsp_transport = rtsp_transport
         self.open_timeout_ms = open_timeout_ms
         self.read_timeout_ms = read_timeout_ms
+        self.rtsp_hwaccel = str(rtsp_hwaccel or "none").strip().lower()
+        self.rtsp_hwaccel_device = str(rtsp_hwaccel_device or "0").strip()
+        self.rtsp_hwaccel_decoder = str(rtsp_hwaccel_decoder or "").strip()
+        self.rtsp_hwaccel_allow_fallback = bool(rtsp_hwaccel_allow_fallback)
         self.stale_threshold_sec = stale_threshold_sec
 
         # State
@@ -129,6 +138,7 @@ class CameraStream:
         self._frames_read = 0
         self._frames_sampled = 0
         self._reconnect_count = 0
+        self._active_hwaccel = "none"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -392,49 +402,87 @@ class CameraStream:
 
     def _try_connect(self, max_retries: int = 5) -> Optional[cv2.VideoCapture]:
         """Try to connect to RTSP with retries and backoff."""
+        prefer_hwaccel = self.rtsp_hwaccel not in {"", "none", "off", "false", "0"}
+        capture_modes = []
+        if prefer_hwaccel:
+            capture_modes.append(True)
+            if self.rtsp_hwaccel_allow_fallback:
+                capture_modes.append(False)
+        else:
+            capture_modes.append(False)
+
         for attempt in range(max_retries):
-            try:
-                cap = self._create_capture()
-                if cap.isOpened():
-                    ret, test_frame = cap.read()
-                    if ret and test_frame is not None:
-                        self._reset_backoff()
-                        logger.info(
-                            f"[CameraStream:{self.camera_id}] "
-                            f"Connected (attempt {attempt + 1})"
-                        )
-                        return cap
+            for use_hwaccel in capture_modes:
                 try:
-                    cap.release()
-                except Exception:
-                    pass
-            except Exception as e:
-                self.last_error = f"RTSP connect error: {e}"
+                    cap = self._create_capture(use_hwaccel=use_hwaccel)
+                    if cap.isOpened():
+                        ret, test_frame = cap.read()
+                        if ret and test_frame is not None:
+                            self._reset_backoff()
+                            self._active_hwaccel = self.rtsp_hwaccel if use_hwaccel else "none"
+                            logger.info(
+                                "[CameraStream:%s] Connected (attempt %s, hwaccel=%s)",
+                                self.camera_id,
+                                attempt + 1,
+                                self._active_hwaccel,
+                            )
+                            return cap
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    if use_hwaccel:
+                        logger.warning(
+                            "[CameraStream:%s] HW decode connect attempt failed; falling back to CPU decode.",
+                            self.camera_id,
+                        )
+                except Exception as e:
+                    self.last_error = f"RTSP connect error: {e}"
+                    if use_hwaccel:
+                        logger.warning(
+                            "[CameraStream:%s] HW decode open error: %s",
+                            self.camera_id,
+                            e,
+                        )
             time.sleep(self._next_backoff())
 
         return None
 
-    def _create_capture(self) -> cv2.VideoCapture:
+    def _build_ffmpeg_capture_options(self, use_hwaccel: bool) -> str:
+        parts = [
+            f"rtsp_transport;{self.rtsp_transport}",
+            "fflags;nobuffer",
+            "flags;low_delay",
+            "threads;1",
+            "analyzeduration;500000",
+            "probesize;500000",
+        ]
+        if use_hwaccel and self.rtsp_hwaccel not in {"", "none", "off", "false", "0"}:
+            parts.append(f"hwaccel;{self.rtsp_hwaccel}")
+            if self.rtsp_hwaccel_device:
+                parts.append(f"hwaccel_device;{self.rtsp_hwaccel_device}")
+            if self.rtsp_hwaccel_decoder:
+                parts.append(f"video_codec;{self.rtsp_hwaccel_decoder}")
+        return "|".join(parts)
+
+    def _create_capture(self, use_hwaccel: bool = False) -> cv2.VideoCapture:
         """Create an OpenCV VideoCapture with RTSP options."""
         cap = cv2.VideoCapture()
         cap.set(cv2.CAP_PROP_OPEN_TIMEOUT_MSEC, self.open_timeout_ms)
         cap.set(cv2.CAP_PROP_READ_TIMEOUT_MSEC, self.read_timeout_ms)
 
-        env_flags = {
-            "OPENCV_FFMPEG_CAPTURE_OPTIONS": (
-                f"rtsp_transport;{self.rtsp_transport}"
-                "|fflags;nobuffer"
-                "|flags;low_delay"
-                "|threads;1"
-                "|analyzeduration;500000"
-                "|probesize;500000"
-            ),
-        }
         import os
-        for k, v in env_flags.items():
-            os.environ[k] = v
-
-        cap.open(self.rtsp_url, cv2.CAP_FFMPEG)
+        ffmpeg_opts = self._build_ffmpeg_capture_options(use_hwaccel=use_hwaccel)
+        with _opencv_ffmpeg_env_lock:
+            prev_opts = os.environ.get("OPENCV_FFMPEG_CAPTURE_OPTIONS")
+            os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = ffmpeg_opts
+            try:
+                cap.open(self.rtsp_url, cv2.CAP_FFMPEG)
+            finally:
+                if prev_opts is None:
+                    os.environ.pop("OPENCV_FFMPEG_CAPTURE_OPTIONS", None)
+                else:
+                    os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = prev_opts
         return cap
 
     def _next_backoff(self) -> float:
@@ -465,6 +513,9 @@ class CameraStream:
             "buffer_fps_effective": round(float(self._effective_buffer_fps or 0.0), 2),
             "clip_buffer_fps_config": float(self.clip_buffer_fps or 0.0),
             "clip_buffer_burst_fps_config": float(self.clip_buffer_burst_fps or 0.0),
+            "rtsp_hwaccel_config": self.rtsp_hwaccel,
+            "rtsp_hwaccel_decoder_config": self.rtsp_hwaccel_decoder,
+            "rtsp_hwaccel_active": self._active_hwaccel,
             "frames_read": self._frames_read,
             "frames_sampled": self._frames_sampled,
             "ring_buffer_size": ring_len,
@@ -519,6 +570,10 @@ class StreamManager:
             rtsp_transport=config.get("rtsp_transport", "tcp"),
             open_timeout_ms=config.get("open_timeout_ms", 8000),
             read_timeout_ms=config.get("read_timeout_ms", 8000),
+            rtsp_hwaccel=config.get("rtsp_hwaccel", "none"),
+            rtsp_hwaccel_device=config.get("rtsp_hwaccel_device", "0"),
+            rtsp_hwaccel_decoder=config.get("rtsp_hwaccel_decoder", ""),
+            rtsp_hwaccel_allow_fallback=config.get("rtsp_hwaccel_allow_fallback", True),
             stale_threshold_sec=config.get("stale_threshold_sec", 2.5),
         )
         with self._lock:

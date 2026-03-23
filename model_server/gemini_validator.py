@@ -474,7 +474,15 @@ Respond in JSON format ONLY:
         
         if self.enabled:
             try:
-                self.client = genai.Client(api_key=self.api_key)
+                from model_server import config
+
+                timeout_sec = max(1, int(float(getattr(config, "GEMINI_TIMEOUT_SEC", 30.0) or 30.0)))
+                timeout_ms = max(1000, timeout_sec * 1000)
+                self.client = genai.Client(
+                    api_key=self.api_key,
+                    # google.genai HttpOptions.timeout is in milliseconds.
+                    http_options=types.HttpOptions(timeout=timeout_ms),
+                )
                 print(f"[GeminiValidator] Initialized with model: {self.MODEL_NAME}")
             except Exception as e:
                 print(f"[GeminiValidator] Failed to initialize: {e}")
@@ -882,8 +890,8 @@ Respond in JSON format ONLY:
                 reason = f"API error: {result.get('error')}"
                 self.last_validation_log = {
                     'event_type': event_type,
-                    'is_valid': True,
-                    'confidence': 1.0,
+                    'is_valid': False,
+                    'confidence': 0.0,
                     'reason': reason,
                     'prompt': prompt,
                     'response': result,
@@ -893,7 +901,7 @@ Respond in JSON format ONLY:
                     'packet_summary': meta,
                     'media_ref': media_ref,
                 }
-                return True, 1.0, reason, event_type
+                return False, 0.0, reason, event_type
 
             is_valid, confidence, reason, corrected_event_type = self._parse_new_response_format(result, event_type)
             self.last_validation_log = {
@@ -999,12 +1007,21 @@ Respond in JSON format ONLY:
             'video': _run_video,
             'image': _run_image,
         }
+        last_api_error_result: Optional[Tuple[bool, float, str, str]] = None
         for name in attempts:
             result = runners[name]()
+            if result is None:
+                continue
+            reason = str(result[2] or "")
+            if reason.startswith("API error:"):
+                last_api_error_result = result
+                continue
             if result is not None:
                 return result
 
-        return True, 1.0, "No evidence media available; validation bypassed", event_type
+        if last_api_error_result is not None:
+            return last_api_error_result
+        return False, 0.0, "No validation clip available", event_type
 
     def validate_event(
         self, frame, event_type: str, save_image: bool = True
@@ -1057,9 +1074,8 @@ Respond in JSON format ONLY:
             
             # Check for errors
             if 'error' in result:
-                # On API error, allow the event (don't block on API issues)
-                print(f"[GeminiValidator] API error, allowing event: {result['error']}")
-                return True, 1.0, f"API error: {result['error']}", event_type
+                print(f"[GeminiValidator] API error: {result['error']}")
+                return False, 0.0, f"API error: {result['error']}", event_type
             
             # Parse response using new format parser (handles both old and new formats)
             is_valid, confidence, reason, corrected_event_type = self._parse_new_response_format(result, event_type)
@@ -1100,8 +1116,7 @@ Respond in JSON format ONLY:
             
         except Exception as e:
             print(f"[GeminiValidator] Exception: {e}")
-            # On error, allow the event (don't block on validation errors)
-            return True, 1.0, f"Validation error: {e}", event_type
+            return False, 0.0, f"Validation error: {e}", event_type
     
     def validate_event_video(self, video_path: str, event_type: str) -> Tuple[bool, float, str, str]:
         """
@@ -1137,12 +1152,12 @@ Respond in JSON format ONLY:
             # Parse response
             if 'error' in result:
                 print(f"[GeminiValidator] Video API error: {result['error']}")
-                return True, 1.0, f"API error: {result['error']}", event_type
+                return False, 0.0, f"API error: {result['error']}", event_type
             
             # Check if response is empty
             if not result:
                 print(f"[GeminiValidator] Empty response from Gemini API")
-                return True, 1.0, "Empty API response", event_type
+                return False, 0.0, "Empty API response", event_type
             
             # Parse response using new format parser (handles both old and new formats)
             is_valid, confidence, reason, corrected_event_type = self._parse_new_response_format(result, event_type)
@@ -1175,8 +1190,7 @@ Respond in JSON format ONLY:
             print(f"[GeminiValidator] Video validation exception: {e}")
             import traceback
             traceback.print_exc()
-            # On error, allow the event (don't block on validation errors)
-            return True, 1.0, f"Video validation error: {e}", event_type
+            return False, 0.0, f"Video validation error: {e}", event_type
     
     def _call_gemini_api_video(self, video_bytes: bytes, prompt: str) -> dict:
         """
@@ -1212,14 +1226,13 @@ Respond in JSON format ONLY:
                 )
             )
             
-            # Extract text from response
             if response.text:
                 result = self._extract_json_text(response.text)
                 print(f"[GeminiValidator] Video API response: {result}")
                 return result
-            else:
-                print(f"[GeminiValidator] Video API returned no text. Full response: {response}")
-                return {"error": "No response text"}
+
+            print(f"[GeminiValidator] Video API returned no text. Full response: {response}")
+            return {"error": "No response text"}
                 
         except json.JSONDecodeError as e:
             print(f"[GeminiValidator] JSON parse error for video: {e}")
@@ -1320,4 +1333,3 @@ def validate_detection(frame, event_type: str, api_key: str = None) -> Tuple[boo
     """
     validator = get_validator(api_key)
     return validator.validate_event(frame, event_type)
-

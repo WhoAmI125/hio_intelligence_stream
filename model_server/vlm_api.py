@@ -47,6 +47,13 @@ _worker_locks: dict[str, threading.Lock] = {}
 
 # Optional global lock to serialize Florence-2 inference across all camera threads
 _inference_lock = threading.Lock()
+_tier2_validation_slots = threading.BoundedSemaphore(
+    max(1, int(getattr(server_config, "GEMINI_MAX_CONCURRENT", 1) or 1))
+)
+_clip_save_slots = threading.BoundedSemaphore(
+    max(1, int(getattr(server_config, "CLIP_SAVE_MAX_CONCURRENT", 1) or 1))
+)
+_florence_log_lock = threading.Lock()
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_ROOT = (_PROJECT_ROOT / "data").resolve()
 
@@ -112,6 +119,28 @@ def _trim_text(value: Any, max_len: int = 280) -> str:
     return text[: max_len - 3].rstrip() + "..."
 
 
+def _save_clip_serialized(
+    storage: Any,
+    event_id: str,
+    frames: list[Any],
+    *,
+    fps: float,
+    allow_s3: bool = True,
+) -> Any:
+    if storage is None or not frames:
+        return None
+
+    _clip_save_slots.acquire()
+    try:
+        return storage.save_clip(event_id, frames, fps=fps, allow_s3=allow_s3)
+    finally:
+        _clip_save_slots.release()
+
+
+def _is_api_error_reason(reason: Any) -> bool:
+    return str(reason or "").strip().lower().startswith("api error:")
+
+
 def _append_shadow_feedback_record(record: dict[str, Any]) -> None:
     """Persist manual shadow feedback as JSONL for audit/evolution data."""
     try:
@@ -174,12 +203,28 @@ def _get_or_create_state(camera_id: str) -> dict[str, Any]:
             "recent_events": [],
             "cashier_zone": [],
             "drawer_zone": [],
-            "evidence_mode": str(getattr(server_config, "EVIDENCE_MODE", "hybrid")),
+            "evidence_mode": str(getattr(server_config, "EVIDENCE_MODE", "video_only")),
             "last_frame_age_sec": 0.0,
             "last_overlay_age_sec": 0.0,
             "server_start_time": None,
             "frame_count": 0,
             "recent_inference_logs": [],
+            "last_inference_started_at": None,
+            "last_inference_finished_at": None,
+            "cooldown_tracker": {},
+            "scheduler": {
+                "registered": False,
+                "pending": False,
+                "inflight": False,
+                "jobs_enqueued": 0,
+                "jobs_completed": 0,
+                "jobs_dropped": 0,
+            },
+            "postprocess": {
+                "queue_size": 0,
+                "worker_count": 0,
+                "workers_alive": 0,
+            },
         }
     if camera_id not in _worker_locks:
         _worker_locks[camera_id] = threading.Lock()
@@ -193,6 +238,227 @@ def _get_server_modules():
     return main_mod
 
 
+def _get_scheduler_metrics(camera_id: str) -> dict[str, Any]:
+    srv = _get_server_modules()
+    scheduler = getattr(srv, "inference_scheduler", None)
+    if scheduler is None:
+        return {}
+    try:
+        return scheduler.get_metrics(camera_id)
+    except Exception:
+        return {}
+
+
+def _get_postprocess_metrics() -> dict[str, Any]:
+    srv = _get_server_modules()
+    postprocessor = getattr(srv, "event_postprocessor", None)
+    if postprocessor is None:
+        return {}
+    try:
+        return postprocessor.get_metrics()
+    except Exception:
+        return {}
+
+
+def _append_inference_log(
+    camera_id: str,
+    state: dict[str, Any],
+    *,
+    full_caption: str,
+    cash_caption: str,
+    scenario_results: dict[str, dict[str, Any]],
+) -> None:
+    summary = {}
+    for name in ("cash", "fire", "violence"):
+        r = scenario_results.get(name, {}) if isinstance(scenario_results.get(name, {}), dict) else {}
+        summary[name] = {
+            "is_detected": bool(r.get("is_detected", False)),
+            "confidence": float(r.get("confidence", 0.0) or 0.0),
+            "zone": str(r.get("zone", "full")),
+        }
+    logs = state.get("recent_inference_logs")
+    if not isinstance(logs, list):
+        logs = []
+        state["recent_inference_logs"] = logs
+    logs.append({
+        "at": datetime.now().isoformat(),
+        "camera_id": camera_id,
+        "frame_count": int(state.get("frame_count", 0)),
+        "total_inference_time_ms": float(state.get("last_vlm", {}).get("total_inference_time_ms", 0.0) or 0.0),
+        "cashier_zone_points": len(state.get("cashier_zone", []) or []),
+        "summary": summary,
+        "shared_caption": _trim_text(full_caption),
+        "cash_caption": _trim_text(cash_caption),
+    })
+    if len(logs) > 400:
+        state["recent_inference_logs"] = logs[-400:]
+
+    if not bool(getattr(server_config, "FLORENCE_LOG_PERSIST", True)):
+        return
+
+    day_dir = Path(getattr(server_config, "FLORENCE_LOG_DIR", _DATA_ROOT / "florence_logs")) / datetime.now().strftime("%Y%m%d")
+    day_dir.mkdir(parents=True, exist_ok=True)
+
+    def _trim_text_local(value: Any, limit: int = 500) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        return text[:limit] + "..."
+
+    def _scenario_snapshot(name: str) -> dict[str, Any]:
+        row = scenario_results.get(name, {}) if isinstance(scenario_results.get(name, {}), dict) else {}
+        meta = row.get("metadata", {}) if isinstance(row.get("metadata"), dict) else {}
+        florence_signals = meta.get("florence_signals", {}) if isinstance(meta.get("florence_signals"), dict) else {}
+        snapshot = {
+            "is_detected": bool(row.get("is_detected", False)),
+            "confidence": float(row.get("confidence", 0.0) or 0.0),
+            "zone": str(row.get("zone", "full")),
+            "evidence": _trim_text_local(row.get("evidence", ""), 300),
+            "raw_response_preview": _trim_text_local(row.get("raw_response", ""), 500),
+            "florence_signals": {
+                "matched_keywords": list(florence_signals.get("matched_keywords", []) or []),
+                "object_hints": list(florence_signals.get("object_hints", []) or []),
+                "exclusion_match": list(florence_signals.get("exclusion_match", []) or []),
+                "global_keywords": list(florence_signals.get("global_keywords", []) or []),
+            },
+        }
+        for key in ("cash_path", "roi_confidence", "global_handover_score", "global_keywords"):
+            if key in meta:
+                snapshot[key] = meta.get(key)
+        return snapshot
+
+    payload = {
+        "at": datetime.now().isoformat(),
+        "camera_id": camera_id,
+        "frame_count": int(state.get("frame_count", 0)),
+        "source": str(state.get("last_vlm", {}).get("source", "")),
+        "total_inference_time_ms": float(state.get("last_vlm", {}).get("total_inference_time_ms", 0.0) or 0.0),
+        "cashier_zone_points": len(state.get("cashier_zone", []) or []),
+        "drawer_zone_points": len(state.get("drawer_zone", []) or []),
+        "shared_caption": _trim_text_local(full_caption, 1000),
+        "cash_caption": _trim_text_local(cash_caption, 1000),
+        "summary": summary,
+        "scenarios": {
+            "cash": _scenario_snapshot("cash"),
+            "fire": _scenario_snapshot("fire"),
+            "violence": _scenario_snapshot("violence"),
+        },
+    }
+
+    log_path = day_dir / f"{camera_id}.jsonl"
+    try:
+        with _florence_log_lock:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    except Exception as e:
+        logger.warning("[VLM API] florence log persist failed (%s): %s", camera_id, e)
+
+
+def _update_recent_event(camera_id: str, event: dict[str, Any]) -> None:
+    state = _get_or_create_state(camera_id)
+    events = state.get("recent_events")
+    if not isinstance(events, list):
+        return
+    event_id = str(event.get("event_id", "")).strip()
+    if not event_id:
+        return
+    for idx, existing in enumerate(events):
+        if str(existing.get("event_id", "")).strip() == event_id:
+            events[idx] = event
+            break
+
+
+def _persist_event(camera_id: str, event: dict[str, Any]) -> None:
+    _update_recent_event(camera_id, event)
+    srv = _get_server_modules()
+    if getattr(srv, "local_storage", None) is not None:
+        try:
+            srv.local_storage.save_event(str(event.get("event_id", "")), event)
+        except Exception as e:
+            logger.warning(
+                "[VLM API] event save failed (%s/%s): %s",
+                camera_id,
+                str(event.get("event_id", "")),
+                e,
+            )
+
+
+def _queue_detection_postprocess(payload: dict[str, Any]) -> bool:
+    srv = _get_server_modules()
+    postprocessor = getattr(srv, "event_postprocessor", None)
+    if postprocessor is None:
+        return False
+    return bool(postprocessor.submit(payload))
+
+
+def _sample_entries(entries: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
+    if not entries or count <= 0:
+        return []
+    if len(entries) <= count:
+        return list(entries)
+    if count == 1:
+        return [entries[-1]]
+    out: list[dict[str, Any]] = []
+    last_idx = len(entries) - 1
+    for i in range(count):
+        idx = round((last_idx * i) / (count - 1))
+        out.append(entries[idx])
+    return out
+
+
+def _crop_entries(entries: list[dict[str, Any]], polygon: list[Any], crop_zone: Any, limit: int) -> list[Any]:
+    if not entries or not polygon or crop_zone is None:
+        return []
+    out: list[Any] = []
+    for entry in _sample_entries(entries, limit):
+        frame = entry.get("frame")
+        if frame is None:
+            continue
+        try:
+            cropped, _ = crop_zone(frame, polygon)
+        except Exception:
+            continue
+        if cropped is not None and getattr(cropped, "size", 0) > 0:
+            out.append(cropped)
+    return out
+
+
+def _build_validation_packet(
+    camera_id: str,
+    scenario_name: str,
+    state: dict[str, Any],
+    event: dict[str, Any],
+    result: dict[str, Any],
+    entries: list[dict[str, Any]],
+    anchor_mono_ts: Any,
+) -> dict[str, Any]:
+    srv = _get_server_modules()
+    sampled = _sample_entries(entries, 8)
+    global_keyframes = [e.get("frame") for e in sampled if e.get("frame") is not None]
+    crop_zone = getattr(getattr(srv, "florence_adapter", None), "crop_zone", None)
+    cashier_zone = state.get("cashier_zone", []) or []
+    drawer_zone = state.get("drawer_zone", []) or []
+    cashier_roi_frames = _crop_entries(entries, cashier_zone, crop_zone, 8)
+    drawer_roi_frames = _crop_entries(entries, drawer_zone, crop_zone, 4)
+    result_meta = result.get("metadata", {}) if isinstance(result.get("metadata"), dict) else {}
+    packet = {
+        "episode_id": str(event.get("event_id", "")),
+        "camera_id": camera_id,
+        "event_type": scenario_name,
+        "tier1_confidence": float(result.get("confidence", 0.0) or 0.0),
+        "router_action": str(event.get("router_action", "")),
+        "router_reason": str(event.get("router_reason", "")),
+        "focus_hints": [f"scenario:{scenario_name}", f"zone:{event.get('zone', 'full')}"],
+        "anchor_mono_ts": anchor_mono_ts,
+        "clip_sec_used": float(state.get("validation_clip_sec", 10) or 10.0),
+        "global_keyframes": global_keyframes,
+        "cashier_roi_frames": cashier_roi_frames,
+        "drawer_roi_frames": drawer_roi_frames,
+        "florence_signals": result_meta.get("florence_signals", {}),
+    }
+    return packet
+
+
 def shutdown_all_workers(timeout_sec: float = 2.0) -> dict[str, int]:
     """
     Stop all camera workers for process shutdown.
@@ -202,6 +468,7 @@ def shutdown_all_workers(timeout_sec: float = 2.0) -> dict[str, int]:
     """
     srv = _get_server_modules()
     camera_ids = list(_camera_states.keys())
+    scheduler = getattr(srv, "inference_scheduler", None)
 
     # Step 1: signal stop for every camera state
     for camera_id in camera_ids:
@@ -212,6 +479,14 @@ def shutdown_all_workers(timeout_sec: float = 2.0) -> dict[str, int]:
             state["status"] = "stopping"
             state["run_id"] += 1
             state["last_error"] = "Server shutting down..."
+            if isinstance(state.get("scheduler"), dict):
+                state["scheduler"]["registered"] = False
+
+        if scheduler is not None:
+            try:
+                scheduler.unregister_camera(camera_id)
+            except Exception:
+                pass
 
         if getattr(srv, "stream_manager", None):
             try:
@@ -223,11 +498,12 @@ def shutdown_all_workers(timeout_sec: float = 2.0) -> dict[str, int]:
     stopped = 0
     alive = 0
     for camera_id in camera_ids:
-        th = _inference_threads.get(camera_id)
-        if th is not None and th.is_alive():
-            th.join(timeout=max(0.1, float(timeout_sec)))
-
-        still_alive = bool(th is not None and th.is_alive())
+        scheduler_metrics = _get_scheduler_metrics(camera_id)
+        still_alive = bool(
+            scheduler_metrics.get("registered")
+            or scheduler_metrics.get("pending")
+            or scheduler_metrics.get("inflight")
+        )
         lock = _worker_locks[camera_id]
         with lock:
             state = _get_or_create_state(camera_id)
@@ -236,8 +512,6 @@ def shutdown_all_workers(timeout_sec: float = 2.0) -> dict[str, int]:
                 state["last_error"] = "Worker still stopping during shutdown."
                 alive += 1
             else:
-                if _inference_threads.get(camera_id) is th:
-                    _inference_threads[camera_id] = None
                 state["status"] = "stopped"
                 state["last_error"] = ""
                 stopped += 1
@@ -260,6 +534,7 @@ async def vlm_start(request: Request):
     camera_id = body.get("camera_id", "adhoc_cam")
     state = _get_or_create_state(camera_id)
     worker_lock = _worker_locks[camera_id]
+    scheduler = getattr(srv, "inference_scheduler", None)
 
     # Optional compatibility mode: keep only one active camera inference loop.
     if bool(getattr(server_config, "SINGLE_CAMERA_MODE", False)):
@@ -268,10 +543,9 @@ async def vlm_start(request: Request):
             if str(other_camera_id) == str(camera_id):
                 continue
             other_state = _camera_states.get(other_camera_id) or {}
-            other_thread = _inference_threads.get(other_camera_id)
             other_running = bool(other_state.get("running"))
-            other_alive = bool(other_thread is not None and other_thread.is_alive())
-            if not other_running and not other_alive:
+            other_registered = bool((_get_scheduler_metrics(other_camera_id) or {}).get("registered"))
+            if not other_running and not other_registered:
                 continue
             try:
                 await vlm_stop(camera_id=str(other_camera_id))
@@ -317,7 +591,7 @@ async def vlm_start(request: Request):
         "storyboard",
         "image",
     }
-    req_evidence_mode = str(state.get("evidence_mode", "hybrid")).strip().lower()
+    req_evidence_mode = str(state.get("evidence_mode", "video_only")).strip().lower()
     if isinstance(req_evidence_mode_raw, str) and req_evidence_mode_raw.strip():
         mode = req_evidence_mode_raw.strip().lower()
         if mode in valid_evidence_modes:
@@ -351,11 +625,9 @@ async def vlm_start(request: Request):
 
     # Idempotent fast-path: if same camera is already running with same core stream params,
     # do not force restart. This avoids unnecessary RTSP decoder re-init races.
-    current_thread = _inference_threads.get(camera_id)
     if (
         bool(state.get("running"))
-        and current_thread is not None
-        and current_thread.is_alive()
+        and bool((_get_scheduler_metrics(camera_id) or {}).get("registered"))
         and str(state.get("rtsp_url", "")).strip() == rtsp_url
     ):
         state["base_fps"] = req_base_fps
@@ -372,16 +644,20 @@ async def vlm_start(request: Request):
 
     # Ensure previous worker state is not left running.
     with worker_lock:
-        stale = _inference_threads.get(camera_id)
-        if stale is not None and stale.is_alive() and not state["running"]:
-            stale.join(timeout=2.0)
-
         # If start is called while already running, force a clean restart.
         if state["running"]:
             state["running"] = False
             state["status"] = "stopping"
             state["run_id"] += 1
             state["last_error"] = "Restarting worker..."
+            if isinstance(state.get("scheduler"), dict):
+                state["scheduler"]["registered"] = False
+
+    if scheduler is not None:
+        try:
+            scheduler.unregister_camera(camera_id)
+        except Exception:
+            pass
 
     if state["status"] == "stopping" and srv.stream_manager:
         try:
@@ -390,16 +666,6 @@ async def vlm_start(request: Request):
             pass
 
     with worker_lock:
-        stale = _inference_threads.get(camera_id)
-        if stale is not None and stale.is_alive() and not state["running"]:
-            stale.join(timeout=3.0)
-            if stale.is_alive():
-                return JSONResponse(
-                    {"success": False, "error": "Previous inference loop is still stopping. Retry in a moment."},
-                    status_code=409,
-                )
-            _inference_threads[camera_id] = None
-
         # Update state from request
         state["rtsp_url"] = rtsp_url
         state["base_fps"] = req_base_fps
@@ -436,18 +702,30 @@ async def vlm_start(request: Request):
         state["last_error"] = ""
         state["server_start_time"] = datetime.now().isoformat()
         state["frame_count"] = 0
+        state["last_inference_started_at"] = None
+        state["last_inference_finished_at"] = None
+        state["cooldown_tracker"] = {}
         state["run_id"] += 1
-        run_id = state["run_id"]
+        if not isinstance(state.get("scheduler"), dict):
+            state["scheduler"] = {}
+        state["scheduler"]["registered"] = True
 
-        # Start background inference loop for this run id.
-        new_thread = threading.Thread(
-            target=_inference_loop,
-            args=(camera_id, run_id),
-            daemon=True,
-            name=f"vlm-inference-{camera_id}-{run_id}",
+    if scheduler is not None:
+        scheduler.register_camera(camera_id)
+    else:
+        if srv.stream_manager:
+            try:
+                srv.stream_manager.remove_camera(camera_id)
+            except Exception:
+                pass
+        with worker_lock:
+            state["running"] = False
+            state["status"] = "error"
+            state["last_error"] = "Inference scheduler is not available."
+        return JSONResponse(
+            {"success": False, "error": "Inference scheduler is not available."},
+            status_code=503,
         )
-        _inference_threads[camera_id] = new_thread
-        new_thread.start()
 
     logger.info(f"[VLM API] Started: {rtsp_url} for camera {camera_id}")
     return {"success": True, "camera_id": camera_id}
@@ -461,11 +739,20 @@ async def vlm_stop(camera_id: str = "adhoc_cam"):
     srv = _get_server_modules()
     state = _get_or_create_state(camera_id)
     worker_lock = _worker_locks[camera_id]
+    scheduler = getattr(srv, "inference_scheduler", None)
 
     with worker_lock:
         state["running"] = False
         state["status"] = "stopping"
         state["run_id"] += 1
+        if isinstance(state.get("scheduler"), dict):
+            state["scheduler"]["registered"] = False
+
+    if scheduler is not None:
+        try:
+            scheduler.unregister_camera(camera_id)
+        except Exception:
+            pass
 
     stream_stopped = True
     if srv.stream_manager:
@@ -474,29 +761,27 @@ async def vlm_stop(camera_id: str = "adhoc_cam"):
         except Exception:
             stream_stopped = False
 
-    thread = _inference_threads.get(camera_id)
-    if thread is not None and thread.is_alive():
-        join_timeout = max(3.0, (state["read_timeout_ms"] / 1000.0) + 2.0)
-        thread.join(timeout=join_timeout)
-
-    thread_alive = bool(thread is not None and thread.is_alive())
+    scheduler_metrics = _get_scheduler_metrics(camera_id)
+    worker_alive = bool(
+        scheduler_metrics.get("registered")
+        or scheduler_metrics.get("pending")
+        or scheduler_metrics.get("inflight")
+    )
     with worker_lock:
-        if not thread_alive:
-            if _inference_threads.get(camera_id) is thread:
-                _inference_threads[camera_id] = None
+        if not worker_alive:
             state["status"] = "stopped"
             state["last_error"] = ""
         else:
             state["status"] = "stopping"
-            state["last_error"] = "Inference thread still stopping."
+            state["last_error"] = "Inference worker still stopping."
 
-    if thread_alive or not stream_stopped:
-        logger.warning(f"[VLM API] Stop requested for {camera_id} but inference thread is still alive.")
+    if worker_alive or not stream_stopped:
+        logger.warning(f"[VLM API] Stop requested for {camera_id} but inference worker is still alive.")
     else:
         logger.info(f"[VLM API] Stopped for {camera_id}")
     return {
-        "success": (not thread_alive) and stream_stopped,
-        "inference_thread_alive": thread_alive,
+        "success": (not worker_alive) and stream_stopped,
+        "inference_thread_alive": worker_alive,
         "stream_stopped": stream_stopped,
     }
 
@@ -569,7 +854,8 @@ def vlm_status(camera_id: str = "adhoc_cam"):
     try:
         srv = _get_server_modules()
         state = _get_or_create_state(camera_id)
-        thread = _inference_threads.get(camera_id)
+        scheduler_metrics = _get_scheduler_metrics(camera_id)
+        postprocess_metrics = _get_postprocess_metrics()
 
         if bool(getattr(srv, "is_shutting_down", False)):
             return {
@@ -595,9 +881,11 @@ def vlm_status(camera_id: str = "adhoc_cam"):
                 "router": {"policy_loaded": False},
                 "florence_device_requested": str(getattr(srv.config, "FLORENCE_DEVICE", "unknown")),
                 "florence_device_actual": "shutting_down",
-                "inference_thread_alive": bool(thread is not None and thread.is_alive()),
+                "inference_thread_alive": bool(scheduler_metrics.get("workers_alive")),
                 "cashier_zone_points": len(state.get("cashier_zone", []) or []),
                 "drawer_zone_points": len(state.get("drawer_zone", []) or []),
+                "scheduler": scheduler_metrics,
+                "postprocess": postprocess_metrics,
             }
 
         florence_device_requested = str(getattr(srv.config, "FLORENCE_DEVICE", "unknown"))
@@ -617,7 +905,14 @@ def vlm_status(camera_id: str = "adhoc_cam"):
         ring_size = int(stream_stats.get("ring_buffer_size", stream_stats.get("buffer_size", 0)) or 0)
         stream_fps = float(stream_stats.get("stream_fps", stream_stats.get("fps", 0)) or 0.0)
         buffer_fps = float(stream_stats.get("buffer_fps_effective", state["base_fps"]) or state["base_fps"])
-        inference_thread_alive = bool(thread is not None and thread.is_alive())
+        inference_thread_alive = bool(
+            scheduler_metrics.get("registered")
+            or scheduler_metrics.get("pending")
+            or scheduler_metrics.get("inflight")
+            or scheduler_metrics.get("workers_alive")
+        )
+        state["scheduler"] = scheduler_metrics
+        state["postprocess"] = postprocess_metrics
 
         # Get buffer info
         buffers = {
@@ -662,6 +957,8 @@ def vlm_status(camera_id: str = "adhoc_cam"):
             "inference_thread_alive": inference_thread_alive,
             "cashier_zone_points": len(state.get("cashier_zone", []) or []),
             "drawer_zone_points": len(state.get("drawer_zone", []) or []),
+            "scheduler": scheduler_metrics,
+            "postprocess": postprocess_metrics,
         }
     except Exception as e:
         logger.warning(f"[VLM API] status error ({camera_id}): {e}")
@@ -1125,22 +1422,444 @@ async def vlm_shadow_feedback(request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Background inference loop
+# One-shot inference + async post-processing
 # ---------------------------------------------------------------------------
-def _inference_loop(camera_id: str, run_id: int):
-    """
-    Continuous frame grab -> Florence -> CaptionAnalyzer detection loop.
-    Each loop belongs to one run_id and exits if a new run starts.
-    """
+def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], started_at: float) -> None:
     srv = _get_server_modules()
-    state = _get_or_create_state(camera_id)
-    
+
     from model_server.scenarios.base_scenario import CaptionAnalyzer
     from model_server.scenarios import ScenarioType
 
-    last_inference = 0.0
-    cooldown_tracker: dict[str, float] = {}
+    state["frame_count"] = int(state.get("frame_count", 0)) + 1
+    state["last_frame_age_sec"] = 0.0
+    prev_started = state.get("last_inference_started_at")
+    if prev_started:
+        state["current_fps"] = 1.0 / max(float(started_at) - float(prev_started), 0.001)
+    state["last_inference_started_at"] = started_at
 
+    cash_zone_applied = False
+    cash_zone_bbox: list[int] | None = None
+    scenario_results: dict[str, dict[str, Any]] = {}
+    full_caption = ""
+    cash_caption = ""
+
+    if getattr(srv, "pipeline_orchestrator", None) is not None:
+        try:
+            zones = {
+                "cashier": state.get("cashier_zone", []),
+                "drawer": state.get("drawer_zone", []),
+            }
+            inference_ctx = (
+                _inference_lock
+                if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
+                else nullcontext()
+            )
+            with inference_ctx:
+                orch_result = srv.pipeline_orchestrator.process_frame_sequential(frame, zones=zones)
+
+            scenario_results = {name: sr.to_dict() for name, sr in orch_result.scenario_results.items()}
+            full_caption = orch_result.metadata.get("shared_caption", "")
+            cash_zone_applied = len(zones["cashier"]) >= 3
+            state["last_vlm"] = {
+                "scenario_results": scenario_results,
+                "total_inference_time_ms": orch_result.total_inference_time_ms,
+                "cashier_zone_applied": cash_zone_applied,
+                "cashier_zone_points": len(zones["cashier"]),
+                "shared_caption": full_caption,
+                "cash_caption": (scenario_results.get("cash", {}) or {}).get("raw_response", ""),
+                "source": "orchestrator",
+            }
+        except Exception as e:
+            state["last_error"] = f"Orchestrator error: {e}"
+            logger.exception("[VLM API] Orchestrator error for %s", camera_id)
+            return
+    elif getattr(srv, "florence_adapter", None) is not None:
+        try:
+            inference_ctx = (
+                _inference_lock
+                if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
+                else nullcontext()
+            )
+            with inference_ctx:
+                full_caption = srv.florence_adapter.infer(frame, "")
+                cash_caption = full_caption
+                cashier_zone = state.get("cashier_zone", []) or []
+                if len(cashier_zone) >= 3:
+                    cropped, bbox = srv.florence_adapter.crop_zone(frame, cashier_zone)
+                    if cropped is not None and getattr(cropped, "size", 0) > 0:
+                        cash_caption = srv.florence_adapter.infer(cropped, "")
+                        cash_zone_applied = True
+                        cash_zone_bbox = [int(v) for v in bbox]
+        except Exception as e:
+            state["last_error"] = f"Florence error: {e}"
+            logger.exception("[VLM API] Florence fallback error for %s", camera_id)
+            return
+
+        for scenario_name in ["cash", "fire", "violence"]:
+            t0 = time.time()
+            try:
+                scenario_type = ScenarioType[scenario_name.upper()]
+                if scenario_name == "cash" and cash_zone_applied:
+                    scenario_caption = f"[ROI]\n{cash_caption}\n\n[GLOBAL]\n{full_caption}"
+                else:
+                    scenario_caption = full_caption
+
+                result = CaptionAnalyzer.analyze(scenario_caption, scenario_type)
+                result["inference_time_ms"] = round((time.time() - t0) * 1000, 1)
+                result["raw_response"] = scenario_caption
+                result["scenario_type"] = scenario_name
+                result["zone"] = "cashier" if (scenario_name == "cash" and cash_zone_applied) else "full"
+                if scenario_name == "cash" and cash_zone_applied and cash_zone_bbox is not None:
+                    result["zone_bbox"] = cash_zone_bbox
+                scenario_results[scenario_name] = result
+            except Exception as e:
+                scenario_results[scenario_name] = {
+                    "error": str(e),
+                    "is_detected": False,
+                    "confidence": 0.0,
+                    "zone": "cashier" if (scenario_name == "cash" and cash_zone_applied) else "full",
+                }
+
+        state["last_vlm"] = {
+            "scenario_results": scenario_results,
+            "total_inference_time_ms": round(sum(r.get("inference_time_ms", 0) for r in scenario_results.values()), 1),
+            "cashier_zone_applied": cash_zone_applied,
+            "cashier_zone_points": len(state.get("cashier_zone", []) or []),
+            "shared_caption": full_caption,
+            "cash_caption": cash_caption,
+            "source": "fallback",
+        }
+    else:
+        if state["frame_count"] == 1:
+            state["last_error"] = "Florence-2 not loaded. Caption analysis only."
+        return
+
+    if scenario_results:
+        _append_inference_log(
+            camera_id,
+            state,
+            full_caption=full_caption,
+            cash_caption=cash_caption,
+            scenario_results=scenario_results,
+        )
+
+    cooldown_tracker = state.get("cooldown_tracker")
+    if not isinstance(cooldown_tracker, dict):
+        cooldown_tracker = {}
+        state["cooldown_tracker"] = cooldown_tracker
+
+    for scenario_name, result in scenario_results.items():
+        if not result.get("is_detected"):
+            continue
+
+        last_event_time = float(cooldown_tracker.get(scenario_name, 0.0) or 0.0)
+        if started_at - last_event_time < float(state["event_cooldown_sec"]):
+            continue
+
+        cooldown_tracker[scenario_name] = started_at
+        event_id = f"ev_{int(started_at * 1000)}_{scenario_name}_{camera_id}"
+        event_caption = result.get("raw_response") or result.get("evidence") or ""
+        event = {
+            "event_id": event_id,
+            "at": datetime.now().isoformat(),
+            "event_type": scenario_name,
+            "scenario": scenario_name,
+            "is_detected": True,
+            "confidence": result.get("confidence", 0),
+            "gemini": {
+                "state": "pending",
+                "validated": None,
+                "confidence": None,
+                "reason": "",
+            },
+            "human_feedback": None,
+            "caption": event_caption,
+            "matched_keywords": result.get("matched_keywords", []),
+            "clip_url": "",
+            "zone": result.get("zone", "full"),
+            "cashier_zone_used": bool(scenario_name == "cash" and cash_zone_applied),
+            "drawer_zone_used": bool(len(state.get("drawer_zone", []) or []) >= 3),
+            "camera_id": camera_id,
+            "postprocess_state": "pending",
+        }
+
+        needs_tier2 = False
+        if getattr(srv, "evidence_router", None) is not None:
+            from model_server.episode_manager import Episode, EpisodeState
+
+            ep = Episode(episode_id=event_id, camera_id=camera_id, event_type=scenario_name)
+            ep.state = EpisodeState.VALIDATING
+            ep.detection_count = 1
+            ep.confidence_history = [result.get("confidence", 0)]
+            action, reason, _, _ = srv.evidence_router.select_action(ep, record_decision=True)
+            needs_tier2 = action in getattr(srv.evidence_router, "TIER2_ACTIONS", {"GEMINI_IMG", "GEMINI_VIDEO"})
+            event["router_action"] = action
+            event["router_reason"] = reason
+        else:
+            from model_server.agents.dynamic_agent import UncertaintyGate
+
+            needs_tier2 = UncertaintyGate.should_escalate(scenario_name, result, stability=0.5)
+
+        event["gemini"]["state"] = "needed" if needs_tier2 else "skipped"
+        if not isinstance(state.get("last_validation"), dict):
+            state["last_validation"] = {}
+        state["last_validation"][scenario_name] = dict(event.get("gemini", {}))
+
+        state["recent_events"].append(event)
+        if len(state["recent_events"]) > 100:
+            state["recent_events"] = state["recent_events"][-100:]
+        _persist_event(camera_id, event)
+
+        payload = {
+            "camera_id": camera_id,
+            "scenario_name": scenario_name,
+            "event": event,
+            "result": result,
+            "frame": frame,
+            "anchor_mono_ts": time.monotonic(),
+            "needs_tier2": bool(needs_tier2),
+        }
+        queued = _queue_detection_postprocess(payload)
+        if queued:
+            event["postprocess_state"] = "queued"
+            _persist_event(camera_id, event)
+        else:
+            if needs_tier2:
+                event["gemini"]["state"] = "error"
+                event["gemini"]["reason"] = "postprocess queue unavailable"
+                state["last_validation"][scenario_name] = dict(event["gemini"])
+            event["postprocess_state"] = "error"
+            _persist_event(camera_id, event)
+
+        if getattr(srv, "inference_scheduler", None) is not None:
+            try:
+                srv.inference_scheduler.mark_camera_active(camera_id)
+            except Exception:
+                pass
+
+        if srv.stream_manager:
+            try:
+                srv.stream_manager.trigger_burst(camera_id)
+            except Exception:
+                pass
+
+        shadow = srv.shadow_agents.get(scenario_name)
+        if shadow:
+            shadow.enqueue({
+                "event_id": event_id,
+                "tier1_result": result,
+            })
+
+        logger.info(
+            "[VLM API] Detection (%s): %s conf=%.2f zone=%s tier2=%s queued=%s",
+            camera_id,
+            scenario_name,
+            float(result.get("confidence", 0) or 0.0),
+            result.get("zone", "full"),
+            "Y" if needs_tier2 else "N",
+            "Y" if queued else "N",
+        )
+
+    state["last_inference_finished_at"] = time.time()
+
+
+def _process_detection_event(payload: dict[str, Any]) -> None:
+    srv = _get_server_modules()
+    camera_id = str(payload.get("camera_id", "")).strip()
+    scenario_name = str(payload.get("scenario_name", "")).strip().lower()
+    event = payload.get("event") if isinstance(payload.get("event"), dict) else {}
+    result = payload.get("result") if isinstance(payload.get("result"), dict) else {}
+    frame = payload.get("frame")
+    anchor_mono_ts = payload.get("anchor_mono_ts")
+    needs_tier2 = bool(payload.get("needs_tier2"))
+    state = _get_or_create_state(camera_id)
+
+    if not event or not camera_id or not scenario_name:
+        return
+
+    event["postprocess_state"] = "processing"
+    _persist_event(camera_id, event)
+
+    clip_frames_for_lora: list[Any] = []
+    val_clip_path = None
+    postprocess_ok = True
+
+    try:
+        if needs_tier2 and srv.gemini_validator is not None:
+            try:
+                _tier2_validation_slots.acquire()
+                try:
+                    val_seconds = float(state.get("validation_clip_sec", 10))
+                    val_entries = (
+                        srv.stream_manager.get_clip_frames(
+                            camera_id,
+                            window_sec=val_seconds,
+                            anchor_mono_ts=anchor_mono_ts,
+                        )
+                        if srv.stream_manager
+                        else []
+                    )
+                    if val_entries and len(val_entries) >= 2:
+                        val_frames = [e["frame"] for e in val_entries if e.get("frame") is not None]
+                        if val_frames and srv.local_storage:
+                            ts0 = float(val_entries[0].get("mono_ts", 0) or 0)
+                            ts1 = float(val_entries[-1].get("mono_ts", 0) or 0)
+                            v_fps = len(val_entries) / max(ts1 - ts0, 0.1)
+                            v_fps = min(max(v_fps, 1.0), 30.0)
+                            val_clip_path = _save_clip_serialized(
+                                srv.local_storage,
+                                f"val_{event['event_id']}",
+                                val_frames,
+                                fps=v_fps,
+                                allow_s3=False,
+                            )
+
+                    validation_packet = _build_validation_packet(
+                        camera_id,
+                        scenario_name,
+                        state,
+                        event,
+                        result,
+                        val_entries,
+                        anchor_mono_ts,
+                    )
+                    gemini_ok, gemini_conf, gemini_reason, _ = (
+                        srv.gemini_validator.validate_event_evidence(
+                            packet=validation_packet,
+                            mode="video_only",
+                            video_path=val_clip_path,
+                            frame=frame,
+                        )
+                    )
+                    if (not gemini_ok) and _is_api_error_reason(gemini_reason):
+                        gemini_ok = True
+                        gemini_conf = 1.0
+                        gemini_reason = f"FAIL-OPEN on API error: {gemini_reason}"
+                finally:
+                    _tier2_validation_slots.release()
+
+                val_log = getattr(srv.gemini_validator, "last_validation_log", {}) or {}
+                event["gemini"] = {
+                    "state": "done",
+                    "validated": gemini_ok,
+                    "confidence": gemini_conf,
+                    "reason": gemini_reason,
+                    "at": datetime.now().isoformat(),
+                    "validation_type": str(val_log.get("input_mode", "")) or "video",
+                    "input_mode": str(val_log.get("input_mode", "")) or "video",
+                    "prompt_version": str(val_log.get("prompt_version", "")),
+                    "processing_time_ms": int(val_log.get("processing_time_ms", 0) or 0),
+                    "media_ref": str(val_log.get("media_ref", "")),
+                }
+                if not gemini_ok:
+                    logger.info(
+                        "[VLM API] Gemini REJECTED (%s): %s conf=%.2f reason=%s",
+                        camera_id,
+                        scenario_name,
+                        float(gemini_conf or 0.0),
+                        str(gemini_reason or "")[:80],
+                    )
+                    event["is_detected"] = False
+                    event["rejected_by_gemini"] = True
+            except Exception as gem_err:
+                postprocess_ok = False
+                logger.warning("[VLM API] Gemini validation error (%s): %s", camera_id, gem_err)
+                event["gemini"]["state"] = "error"
+                event["gemini"]["reason"] = str(gem_err)
+
+            if val_clip_path and os.path.exists(val_clip_path):
+                try:
+                    os.remove(val_clip_path)
+                except OSError:
+                    pass
+        if srv.local_storage and srv.stream_manager:
+            try:
+                clip_seconds = float(state.get("clip_duration_sec", 10))
+                clip_entries = srv.stream_manager.get_clip_frames(
+                    camera_id,
+                    window_sec=clip_seconds,
+                    anchor_mono_ts=anchor_mono_ts,
+                )
+                if clip_entries:
+                    clip_frames = [e["frame"] for e in clip_entries if e.get("frame") is not None]
+                    if clip_frames:
+                        clip_frames_for_lora = clip_frames
+                        if len(clip_entries) >= 2:
+                            ts_first = float(clip_entries[0].get("mono_ts", 0) or 0)
+                            ts_last = float(clip_entries[-1].get("mono_ts", 0) or 0)
+                            duration = ts_last - ts_first
+                            clip_fps = len(clip_entries) / max(duration, 0.1)
+                            clip_fps = min(max(clip_fps, 1.0), 30.0)
+                        else:
+                            clip_fps = 15.0
+
+                        clip_path = _save_clip_serialized(
+                            srv.local_storage,
+                            event["event_id"],
+                            clip_frames,
+                            fps=clip_fps,
+                        )
+                        if clip_path:
+                            event["clip_url"] = clip_path
+                            logger.info(
+                                "[VLM API] Clip saved (%s): %s frames, %.0fs, fps=%.1f",
+                                camera_id,
+                                len(clip_frames),
+                                clip_seconds,
+                                clip_fps,
+                            )
+
+                        thumb_path = srv.local_storage.save_thumbnail(event["event_id"], clip_frames[-1])
+                        if thumb_path:
+                            event["thumbnail_url"] = thumb_path
+            except Exception as clip_err:
+                postprocess_ok = False
+                logger.warning("[VLM API] Clip/thumbnail save failed (%s): %s", camera_id, clip_err)
+
+        if srv.data_collector is not None:
+            try:
+                gem = event.get("gemini", {}) if isinstance(event.get("gemini"), dict) else {}
+                if (
+                    scenario_name == "cash"
+                    and gem.get("state") == "done"
+                    and bool(gem.get("validated")) is True
+                    and clip_frames_for_lora
+                ):
+                    srv.data_collector.collect_gemini_validated_clip(
+                        event_id=event["event_id"],
+                        scenario=scenario_name,
+                        clip_frames=clip_frames_for_lora,
+                        caption=str(event.get("caption") or ""),
+                        camera_id=camera_id,
+                        gemini_confidence=float(gem.get("confidence") or 0.0),
+                        matched_keywords=list(result.get("matched_keywords") or []),
+                        sample_count=3,
+                    )
+            except Exception as dc_err:
+                logger.debug("[VLM API] DataCollector gemini-clip error: %s", dc_err)
+    except Exception as e:
+        postprocess_ok = False
+        event["postprocess_state"] = "error"
+        logger.warning("[VLM API] postprocess error (%s/%s): %s", camera_id, event.get("event_id"), e)
+    finally:
+        event["postprocess_state"] = "done" if postprocess_ok else "error"
+        if not isinstance(state.get("last_validation"), dict):
+            state["last_validation"] = {}
+        state["last_validation"][scenario_name] = dict(event.get("gemini", {}))
+        if event.get("clip_url"):
+            if not isinstance(state.get("last_clip_path"), dict):
+                state["last_clip_path"] = {}
+            state["last_clip_path"][scenario_name] = event["clip_url"]
+        _persist_event(camera_id, event)
+
+
+# ---------------------------------------------------------------------------
+# Legacy per-camera loop kept for fallback/testing
+# ---------------------------------------------------------------------------
+def _inference_loop(camera_id: str, run_id: int):
+    srv = _get_server_modules()
+    state = _get_or_create_state(camera_id)
+    last_started = 0.0
     logger.info(f"[VLM API] Inference loop started for {camera_id} (run_id={run_id})")
 
     while (
@@ -1151,404 +1870,16 @@ def _inference_loop(camera_id: str, run_id: int):
         try:
             now = time.time()
             interval = 1.0 / max(float(state["base_fps"]), 0.5)
-            if now - last_inference < interval:
+            if now - last_started < interval:
                 time.sleep(0.05)
                 continue
-
             frame = srv.stream_manager.get_frame(camera_id) if srv.stream_manager else None
             if frame is None:
                 state["last_frame_age_sec"] = 999.0
                 time.sleep(0.5)
                 continue
-
-            state["frame_count"] += 1
-            state["last_frame_age_sec"] = 0.0
-            state["current_fps"] = 1.0 / max(now - last_inference, 0.001)
-            last_inference = now
-
-            cash_zone_applied = False
-            cash_zone_bbox: list[int] | None = None
-            scenario_results: dict[str, dict[str, Any]] = {}
-            full_caption = ""
-            cash_caption = ""
-
-            if getattr(srv, "pipeline_orchestrator", None) is not None:
-                try:
-                    zones = {
-                        "cashier": state.get("cashier_zone", []),
-                        "drawer": state.get("drawer_zone", [])
-                    }
-                    inference_ctx = (
-                        _inference_lock
-                        if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
-                        else nullcontext()
-                    )
-                    with inference_ctx:
-                        orch_result = srv.pipeline_orchestrator.process_frame_sequential(frame, zones=zones)
-                    
-                    scenario_results = {name: sr.to_dict() for name, sr in orch_result.scenario_results.items()}
-                    full_caption = orch_result.metadata.get("shared_caption", "")
-                    cash_zone_applied = len(zones["cashier"]) >= 3
-                    
-                    state["last_vlm"] = {
-                        "scenario_results": scenario_results,
-                        "total_inference_time_ms": orch_result.total_inference_time_ms,
-                        "cashier_zone_applied": cash_zone_applied,
-                        "cashier_zone_points": len(zones["cashier"]),
-                        "shared_caption": full_caption,
-                        "cash_caption": (scenario_results.get("cash", {}) or {}).get("raw_response", ""),
-                        "source": "orchestrator",
-                    }
-                except Exception as e:
-                    state["last_error"] = f"Orchestrator error: {e}"
-            elif getattr(srv, "florence_adapter", None) is not None:
-                # Fallback purely to avoid breaking completely if orchestrator failed init
-                try:
-                    inference_ctx = (
-                        _inference_lock
-                        if bool(getattr(server_config, "GLOBAL_INFERENCE_LOCK", True))
-                        else nullcontext()
-                    )
-                    with inference_ctx:
-                        full_caption = srv.florence_adapter.infer(frame, "")
-                        cash_caption = full_caption
-                        cashier_zone = state.get("cashier_zone", []) or []
-                        if len(cashier_zone) >= 3:
-                            cropped, bbox = srv.florence_adapter.crop_zone(frame, cashier_zone)
-                            if cropped is not None and getattr(cropped, "size", 0) > 0:
-                                cash_caption = srv.florence_adapter.infer(cropped, "")
-                                cash_zone_applied = True
-                                cash_zone_bbox = [int(v) for v in bbox]
-                except Exception as e:
-                    state["last_error"] = f"Florence error: {e}"
-
-                for scenario_name in ["cash", "fire", "violence"]:
-                    t0 = time.time()
-                    try:
-                        scenario_type = ScenarioType[scenario_name.upper()]
-                        if scenario_name == "cash" and cash_zone_applied:
-                            scenario_caption = f"[ROI]\n{cash_caption}\n\n[GLOBAL]\n{full_caption}"
-                        else:
-                            scenario_caption = full_caption
-
-                        result = CaptionAnalyzer.analyze(scenario_caption, scenario_type)
-                        result["inference_time_ms"] = round((time.time() - t0) * 1000, 1)
-                        result["raw_response"] = scenario_caption
-                        result["scenario_type"] = scenario_name
-                        result["zone"] = "cashier" if (scenario_name == "cash" and cash_zone_applied) else "full"
-                        
-                        if scenario_name == "cash" and cash_zone_applied and cash_zone_bbox is not None:
-                            result["zone_bbox"] = cash_zone_bbox
-                        scenario_results[scenario_name] = result
-                    except Exception as e:
-                        scenario_results[scenario_name] = {
-                            "error": str(e),
-                            "is_detected": False,
-                            "confidence": 0.0,
-                            "zone": "cashier" if (scenario_name == "cash" and cash_zone_applied) else "full",
-                        }
-
-                state["last_vlm"] = {
-                    "scenario_results": scenario_results,
-                    "total_inference_time_ms": round(sum(r.get("inference_time_ms", 0) for r in scenario_results.values()), 1),
-                    "cashier_zone_applied": cash_zone_applied,
-                    "cashier_zone_points": len(state.get("cashier_zone", []) or []),
-                    "shared_caption": full_caption,
-                    "cash_caption": cash_caption,
-                    "source": "fallback",
-                }
-            else:
-                if state["frame_count"] == 1:
-                    state["last_error"] = "Florence-2 not loaded. Caption analysis only."
-
-            # Keep a rolling server-side log of Florence inference results.
-            if scenario_results:
-                summary = {}
-                for name in ("cash", "fire", "violence"):
-                    r = scenario_results.get(name, {}) if isinstance(scenario_results.get(name, {}), dict) else {}
-                    summary[name] = {
-                        "is_detected": bool(r.get("is_detected", False)),
-                        "confidence": float(r.get("confidence", 0.0) or 0.0),
-                        "zone": str(r.get("zone", "full")),
-                    }
-                logs = state.get("recent_inference_logs")
-                if not isinstance(logs, list):
-                    logs = []
-                    state["recent_inference_logs"] = logs
-                logs.append({
-                    "at": datetime.now().isoformat(),
-                    "camera_id": camera_id,
-                    "frame_count": int(state.get("frame_count", 0)),
-                    "total_inference_time_ms": float(state.get("last_vlm", {}).get("total_inference_time_ms", 0.0) or 0.0),
-                    "cashier_zone_points": len(state.get("cashier_zone", []) or []),
-                    "summary": summary,
-                    "shared_caption": _trim_text(full_caption),
-                    "cash_caption": _trim_text(cash_caption),
-                })
-                if len(logs) > 400:
-                    state["recent_inference_logs"] = logs[-400:]
-
-            for scenario_name, result in scenario_results.items():
-                if not result.get("is_detected"):
-                    continue
-
-                last_event_time = cooldown_tracker.get(scenario_name, 0.0)
-                if now - last_event_time < float(state["event_cooldown_sec"]):
-                    continue
-
-                cooldown_tracker[scenario_name] = now
-                event_id = f"ev_{int(now * 1000)}_{scenario_name}_{camera_id}"
-                event_caption = result.get("raw_response") or result.get("evidence") or ""
-
-                event = {
-                    "event_id": event_id,
-                    "at": datetime.now().isoformat(),
-                    "event_type": scenario_name,
-                    "scenario": scenario_name,
-                    "is_detected": True,
-                    "confidence": result.get("confidence", 0),
-                    "gemini": {
-                        "state": "pending",
-                        "validated": None,
-                        "confidence": None,
-                        "reason": "",
-                    },
-                    "human_feedback": None,
-                    "caption": event_caption,
-                    "matched_keywords": result.get("matched_keywords", []),
-                    "clip_url": "",
-                    "zone": result.get("zone", "full"),
-                    "cashier_zone_used": bool(scenario_name == "cash" and cash_zone_applied),
-                    "drawer_zone_used": bool(len(state.get("drawer_zone", []) or []) >= 3),
-                    "camera_id": camera_id,
-                }
-
-                # ── Evidence Router / Uncertainty Gate ──
-                needs_tier2 = False
-                if getattr(srv, "evidence_router", None) is not None:
-                    from model_server.episode_manager import Episode, EpisodeState
-                    ep = Episode(episode_id=event_id, camera_id=camera_id, event_type=scenario_name)
-                    ep.state = EpisodeState.VALIDATING
-                    ep.detection_count = 1
-                    ep.confidence_history = [result.get("confidence", 0)]
-                    
-                    action, reason, q, st = srv.evidence_router.select_action(ep, record_decision=True)
-                    needs_tier2 = (action in getattr(srv.evidence_router, "TIER2_ACTIONS", {"GEMINI_IMG", "GEMINI_VIDEO"}))
-                    event["router_action"] = action
-                    event["router_reason"] = reason
-                else:
-                    from model_server.agents.dynamic_agent import UncertaintyGate
-                    needs_tier2 = UncertaintyGate.should_escalate(
-                        scenario_name, result, stability=0.5
-                    )
-
-                if needs_tier2:
-                    event["gemini"]["state"] = "needed"
-                else:
-                    event["gemini"]["state"] = "skipped"
-
-                # ── Gemini Tier2 Validation ──
-                if needs_tier2 and srv.gemini_validator is not None:
-                    try:
-                        val_seconds = float(state.get("validation_clip_sec", 10))
-                        val_entries = srv.stream_manager.get_clip_frames(
-                            camera_id, window_sec=val_seconds
-                        ) if srv.stream_manager else []
-
-                        val_clip_path = None
-                        if val_entries and len(val_entries) >= 2:
-                            val_frames = [
-                                e["frame"] for e in val_entries
-                                if e.get("frame") is not None
-                            ]
-                            if val_frames and srv.local_storage:
-                                # Estimate fps for validation clip
-                                ts0 = val_entries[0].get("mono_ts", 0)
-                                ts1 = val_entries[-1].get("mono_ts", 0)
-                                v_fps = len(val_entries) / max(ts1 - ts0, 0.1)
-                                v_fps = min(max(v_fps, 1.0), 30.0)
-                                val_clip_path = srv.local_storage.save_clip(
-                                    f"val_{event_id}", val_frames, fps=v_fps, allow_s3=False
-                                )
-
-                        gemini_ok, gemini_conf, gemini_reason, _ = (
-                            srv.gemini_validator.validate_event_evidence(
-                                packet={
-                                    "event_type": scenario_name,
-                                    "tier1_confidence": result.get("confidence", 0),
-                                },
-                                mode=state.get("evidence_mode", "hybrid"),
-                                video_path=val_clip_path,
-                                frame=frame,
-                            )
-                        )
-
-                        val_log = (
-                            getattr(srv.gemini_validator, "last_validation_log", {}) or {}
-                        )
-                        event["gemini"] = {
-                            "state": "done",
-                            "validated": gemini_ok,
-                            "confidence": gemini_conf,
-                            "reason": gemini_reason,
-                            "at": datetime.now().isoformat(),
-                            "validation_type": (
-                                str(
-                                    val_log.get("input_mode", "")
-                                )
-                                or ("video" if val_clip_path else "image")
-                            ),
-                            "input_mode": str(val_log.get("input_mode", "")),
-                            "prompt_version": str(val_log.get("prompt_version", "")),
-                            "processing_time_ms": int(val_log.get("processing_time_ms", 0) or 0),
-                            "media_ref": str(val_log.get("media_ref", "")),
-                        }
-
-                        # Clean up temp validation clip
-                        if val_clip_path and os.path.exists(val_clip_path):
-                            try:
-                                os.remove(val_clip_path)
-                            except OSError:
-                                pass
-
-                        if not gemini_ok:
-                            # Keep rejected result for audit/review, but mark as not detected.
-                            logger.info(
-                                f"[VLM API] Gemini REJECTED ({camera_id}): "
-                                f"{scenario_name} conf={gemini_conf:.2f} "
-                                f"reason={gemini_reason[:80]}"
-                            )
-                            event["is_detected"] = False
-                            event["rejected_by_gemini"] = True
-                            if not isinstance(state.get("last_validation"), dict):
-                                state["last_validation"] = {}
-                            state["last_validation"][scenario_name] = dict(event["gemini"])
-                            # Keep rejected events for Gemini Logs / audit visibility.
-
-                    except Exception as gem_err:
-                        logger.warning(
-                            f"[VLM API] Gemini validation error ({camera_id}): {gem_err}"
-                        )
-                        event["gemini"]["state"] = "error"
-                        event["gemini"]["reason"] = str(gem_err)
-                        # Fail-open: allow event through on error
-
-                # ── Append confirmed event ──
-                state["recent_events"].append(event)
-                if len(state["recent_events"]) > 100:
-                    state["recent_events"] = state["recent_events"][-100:]
-
-                if srv.local_storage:
-                    srv.local_storage.save_event(event_id, event)
-
-                # ── Save clip from ring buffer ──
-                clip_frames_for_lora = []
-                if srv.local_storage and srv.stream_manager:
-                    try:
-                        clip_seconds = float(state.get("clip_duration_sec", 10))
-                        clip_entries = srv.stream_manager.get_clip_frames(
-                            camera_id, window_sec=clip_seconds
-                        )
-                        if clip_entries:
-                            clip_frames = [
-                                e["frame"] for e in clip_entries
-                                if e.get("frame") is not None
-                            ]
-                            if clip_frames:
-                                clip_frames_for_lora = clip_frames
-                                # Estimate FPS from timestamps
-                                if len(clip_entries) >= 2:
-                                    ts_first = clip_entries[0].get("mono_ts", 0)
-                                    ts_last = clip_entries[-1].get("mono_ts", 0)
-                                    duration = ts_last - ts_first
-                                    clip_fps = len(clip_entries) / max(duration, 0.1)
-                                    clip_fps = min(max(clip_fps, 1.0), 30.0)
-                                else:
-                                    clip_fps = 15.0
-
-                                clip_path = srv.local_storage.save_clip(
-                                    event_id, clip_frames, fps=clip_fps
-                                )
-                                if clip_path:
-                                    event["clip_url"] = clip_path
-                                    srv.local_storage.save_event(event_id, event)
-                                    logger.info(
-                                        f"[VLM API] Clip saved ({camera_id}): "
-                                        f"{len(clip_frames)} frames, "
-                                        f"{clip_seconds:.0f}s, fps={clip_fps:.1f}"
-                                    )
-
-                                # ── Save thumbnail (last frame of clip) ──
-                                last_frame = clip_frames[-1]
-                                thumb_path = srv.local_storage.save_thumbnail(
-                                    event_id, last_frame
-                                )
-                                if thumb_path:
-                                    event["thumbnail_url"] = thumb_path
-                                    srv.local_storage.save_event(event_id, event)
-                                    logger.debug(
-                                        f"[VLM API] Thumbnail saved ({camera_id}): "
-                                        f"{thumb_path}"
-                                    )
-
-                    except Exception as clip_err:
-                        logger.warning(
-                            f"[VLM API] Clip/thumbnail save failed ({camera_id}): {clip_err}"
-                        )
-
-                # ── LoRA collection: cash only, Gemini-approved clip evidence only ──
-                if srv.data_collector is not None:
-                    try:
-                        gem = event.get("gemini", {}) if isinstance(event.get("gemini"), dict) else {}
-                        if (
-                            scenario_name == "cash"
-                            and gem.get("state") == "done"
-                            and bool(gem.get("validated")) is True
-                            and clip_frames_for_lora
-                        ):
-                            srv.data_collector.collect_gemini_validated_clip(
-                                event_id=event_id,
-                                scenario=scenario_name,
-                                clip_frames=clip_frames_for_lora,
-                                caption=str(event.get("caption") or ""),
-                                camera_id=camera_id,
-                                gemini_confidence=float(gem.get("confidence") or 0.0),
-                                matched_keywords=list(result.get("matched_keywords") or []),
-                                sample_count=3,
-                            )
-                    except Exception as dc_err:
-                        logger.debug(f"[VLM API] DataCollector gemini-clip error: {dc_err}")
-
-                # ── Trigger burst mode for tighter sampling post-detection ──
-                if srv.stream_manager:
-                    try:
-                        srv.stream_manager.trigger_burst(camera_id)
-                    except Exception:
-                        pass
-
-                # ── Update dead state variables ──
-                if not isinstance(state.get("last_validation"), dict):
-                    state["last_validation"] = {}
-                state["last_validation"][scenario_name] = dict(event.get("gemini", {}))
-                if event.get("clip_url"):
-                    if not isinstance(state.get("last_clip_path"), dict):
-                        state["last_clip_path"] = {}
-                    state["last_clip_path"][scenario_name] = event["clip_url"]
-
-                shadow = srv.shadow_agents.get(scenario_name)
-                if shadow:
-                    shadow.enqueue({
-                        "event_id": event_id,
-                        "tier1_result": result,
-                    })
-
-                logger.info(
-                    f"[VLM API] Detection ({camera_id}): {scenario_name} "
-                    f"conf={result.get('confidence', 0):.2f} "
-                    f"zone={result.get('zone', 'full')} "
-                    f"tier2={'Y' if needs_tier2 else 'N'}"
-                )
-
+            last_started = now
+            _run_inference_once(camera_id, frame, state, now)
         except Exception as e:
             state["last_error"] = str(e)
             logger.error(f"[VLM API] Inference error for {camera_id}: {e}")

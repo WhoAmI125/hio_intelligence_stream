@@ -102,9 +102,59 @@ class LocalStorage:
         self.events_dir = self.base_dir / "events"
         self.clips_dir = self.base_dir / "clips"
         self.thumbnails_dir = self.base_dir / "thumbnails"  # NEW: event preview JPEGs
+        self.flush_state_dir = self.base_dir / "_flush_state"
+        self.flushed_dates_dir = self.flush_state_dir / "flushed_dates"
+        self.local_retention_days = max(
+            1,
+            int(getattr(config, "LOCAL_RETENTION_DAYS", 3) or 3),
+        )
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.clips_dir.mkdir(parents=True, exist_ok=True)
         self.thumbnails_dir.mkdir(parents=True, exist_ok=True)
+        self.flushed_dates_dir.mkdir(parents=True, exist_ok=True)
+
+    def _flushed_marker_path(self, date_str: str) -> Path:
+        return self.flushed_dates_dir / f"{date_str}.done"
+
+    def _is_flushed_date(self, date_str: str) -> bool:
+        return self._flushed_marker_path(date_str).exists()
+
+    def _mark_flushed_date(self, date_str: str) -> None:
+        marker = self._flushed_marker_path(date_str)
+        marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+
+    def _all_local_dates(self) -> list[str]:
+        dates: set[str] = set()
+        for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
+            for day_dir in base.iterdir():
+                if day_dir.is_dir():
+                    dates.add(day_dir.name)
+        return sorted(dates)
+
+    def _cleanup_old_local_dates(self) -> None:
+        all_dates = self._all_local_dates()
+        if len(all_dates) <= self.local_retention_days:
+            return
+
+        keep_dates = set(all_dates[-self.local_retention_days:])
+        for date_str in all_dates:
+            if date_str in keep_dates or not self._is_flushed_date(date_str):
+                continue
+
+            for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
+                day_dir = base / date_str
+                if day_dir.exists():
+                    shutil.rmtree(day_dir, ignore_errors=True)
+
+            marker = self._flushed_marker_path(date_str)
+            if marker.exists():
+                marker.unlink()
+
+            logger.info(
+                "[LocalStorage] Removed local data for %s after retention window (%s days)",
+                date_str,
+                self.local_retention_days,
+            )
 
     # ------------------------------------------------------------------
     # Events
@@ -414,7 +464,11 @@ class LocalStorage:
         today = datetime.now().strftime("%Y%m%d")
         dates = []
         for day_dir in sorted(self.events_dir.iterdir()):
-            if day_dir.is_dir() and day_dir.name < today:  # Don't flush today
+            if (
+                day_dir.is_dir()
+                and day_dir.name < today
+                and not self._is_flushed_date(day_dir.name)
+            ):  # Don't flush today, and don't re-flush already transferred dates.
                 dates.append(day_dir.name)
         return dates
 
@@ -430,12 +484,14 @@ class LocalStorage:
         return [str(p) for p in day_dir.glob("*.*") if p.is_file()]
 
     def archive_date(self, date_str: str) -> None:
-        """Remove event/clip files for a date after successful flush."""
-        for base in (self.events_dir, self.clips_dir):
-            day_dir = base / date_str
-            if day_dir.exists():
-                shutil.rmtree(day_dir, ignore_errors=True)
-                logger.info(f"[LocalStorage] Archived {day_dir}")
+        """Mark a date as flushed and retain only the configured recent local days."""
+        self._mark_flushed_date(date_str)
+        logger.info(
+            "[LocalStorage] Marked %s as flushed; keeping the most recent %s local day(s)",
+            date_str,
+            self.local_retention_days,
+        )
+        self._cleanup_old_local_dates()
 
     # ------------------------------------------------------------------
     # Stats

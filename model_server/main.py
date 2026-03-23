@@ -64,6 +64,8 @@ shadow_agents: dict[str, ShadowAgent] = {}
 critic_trainer: CriticTrainer | None = None
 rule_updater: RuleUpdater | None = None
 data_collector: DataCollector | None = None
+inference_scheduler = None
+event_postprocessor = None
 ws_clients: list[WebSocket] = []
 is_shutting_down: bool = False
 startup_restore_task: asyncio.Task[Any] | None = None
@@ -325,7 +327,8 @@ async def _restore_cameras_after_startup() -> None:
 async def lifespan(app: FastAPI):
     global stream_manager, local_storage, flush_worker
     global florence_adapter, gemini_validator, pipeline_orchestrator, evidence_router, agents, shadow_agents
-    global critic_trainer, rule_updater, data_collector, is_shutting_down, startup_restore_task
+    global critic_trainer, rule_updater, data_collector, inference_scheduler, event_postprocessor
+    global is_shutting_down, startup_restore_task
 
     logger.info("=" * 60)
     logger.info("Model Server starting up...")
@@ -347,6 +350,10 @@ async def lifespan(app: FastAPI):
         "rtsp_transport": config.RTSP_TRANSPORT,
         "open_timeout_ms": config.RTSP_OPEN_TIMEOUT_MS,
         "read_timeout_ms": config.RTSP_READ_TIMEOUT_MS,
+        "rtsp_hwaccel": config.RTSP_HWACCEL,
+        "rtsp_hwaccel_device": config.RTSP_HWACCEL_DEVICE,
+        "rtsp_hwaccel_decoder": config.RTSP_HWACCEL_DECODER,
+        "rtsp_hwaccel_allow_fallback": config.RTSP_HWACCEL_ALLOW_FALLBACK,
     })
 
     local_storage = LocalStorage(base_dir=str(config.DATA_DIR))
@@ -497,6 +504,40 @@ async def lifespan(app: FastAPI):
         f"(dir={config.LORA_DATA_DIR})"
     )
 
+    try:
+        import model_server.vlm_api as legacy_vlm_api
+        from model_server.event_postprocessor import EventPostProcessor
+        from model_server.inference_scheduler import InferenceScheduler
+
+        event_postprocessor = EventPostProcessor(
+            process_fn=legacy_vlm_api._process_detection_event,
+            workers=int(config.POSTPROCESS_WORKERS),
+            queue_size=int(config.POSTPROCESS_QUEUE_SIZE),
+        )
+        event_postprocessor.start()
+
+        inference_scheduler = InferenceScheduler(
+            stream_manager=stream_manager,
+            get_state=legacy_vlm_api._get_or_create_state,
+            process_fn=legacy_vlm_api._run_inference_once,
+            workers=int(config.INFERENCE_WORKERS),
+            queue_size=int(config.INFERENCE_QUEUE_SIZE),
+            active_burst_sec=float(config.INFERENCE_ACTIVE_BURST_SEC),
+            active_burst_fps=float(config.INFERENCE_ACTIVE_BURST_FPS),
+        )
+        inference_scheduler.start()
+        logger.info(
+            "InferenceScheduler initialized workers=%d queue=%d, postprocess workers=%d queue=%d",
+            int(config.INFERENCE_WORKERS),
+            int(config.INFERENCE_QUEUE_SIZE),
+            int(config.POSTPROCESS_WORKERS),
+            int(config.POSTPROCESS_QUEUE_SIZE),
+        )
+    except Exception as e:
+        logger.warning("Scheduler init failed; falling back to legacy behavior: %s", e)
+        inference_scheduler = None
+        event_postprocessor = None
+
     # Restore cameras/zones from DB after reboot.
     # Runs in background thread and starts cameras sequentially to limit resource spikes.
     startup_restore_task = asyncio.create_task(_restore_cameras_after_startup())
@@ -517,6 +558,20 @@ async def lifespan(app: FastAPI):
         )
     except Exception as e:
         logger.warning(f"VLM worker shutdown helper failed: {e}")
+
+    if inference_scheduler:
+        try:
+            inference_scheduler.stop()
+        except Exception as e:
+            logger.warning("InferenceScheduler stop warning: %s", e)
+    inference_scheduler = None
+
+    if event_postprocessor:
+        try:
+            event_postprocessor.stop()
+        except Exception as e:
+            logger.warning("EventPostProcessor stop warning: %s", e)
+    event_postprocessor = None
 
     if stream_manager:
         stream_manager.stop_all()
