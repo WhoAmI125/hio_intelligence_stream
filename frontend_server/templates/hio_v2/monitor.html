@@ -123,10 +123,18 @@
             <span class="note" style="font-weight:800">Cashier Zone</span>
             <button class="btn btn-sm" onclick="undoPoint()">Undo</button>
             <button class="btn btn-sm" onclick="clearZone()">Clear</button>
-            <button class="btn btn-sm btn-primary" onclick="saveZones()">Apply</button>
             <span class="note" id="zoneInfo">points: 0</span>
           </div>
-          <div class="note" style="margin-top:4px">영상 위를 클릭해 점을 찍으세요. 최소 3점부터 폴리곤이 적용됩니다. 이 영역 안에서 현금 거래를 감지합니다.</div>
+          <div style="display:flex;align-items:center;gap:8px;margin-top:6px">
+            <select id="sTriggerMode" style="padding:5px 8px;border:1px solid var(--line);border-radius:6px;font-size:11px;flex:1" onchange="onTriggerModeChange()">
+              <option value="wrist">Wrist Proximity (기본)</option>
+              <option value="zone_intrusion">Zone Intrusion (캐셔 안보일때)</option>
+            </select>
+            <button class="btn btn-sm btn-primary" onclick="saveZones()">Apply</button>
+            <span id="appliedBadge" style="display:none;font-size:11px;font-weight:700;color:#16a34a">✓ Applied</span>
+          </div>
+          <div id="triggerModeDesc" class="note" style="margin-top:4px;padding:6px 8px;background:#f0f7ff;border-radius:6px;font-size:11px;line-height:1.5"></div>
+          <div class="note" style="margin-top:4px">영상 위를 클릭해 점을 찍으세요. 최소 3점부터 폴리곤이 적용됩니다.</div>
 
           <!-- Live Tier 1 Results -->
           <div style="margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
@@ -214,17 +222,9 @@
         <section>
           <div class="fields">
             <div class="field"><label>Camera ID</label><input id="sCamId" readonly /></div>
-            <div class="field">
-              <label>Cash Trigger Mode</label>
-              <select id="sTriggerMode" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px" onchange="onTriggerModeChange()">
-                <option value="wrist">Wrist Proximity (기본)</option>
-                <option value="zone_intrusion">Zone Intrusion (캐셔 안보일때)</option>
-              </select>
-            </div>
             <div class="field" id="wristPxField"><label>Wrist Threshold (px)</label><input id="sWristPx" value="80" /></div>
             <div class="field full"><label>RTSP URL</label><input id="sRtsp" /></div>
           </div>
-          <div id="triggerModeDesc" class="note" style="margin-top:4px;padding:6px 8px;background:#f0f7ff;border-radius:6px;font-size:11px;line-height:1.5"></div>
 
           <div class="actions">
             <button class="btn btn-primary" onclick="startCam()">Start</button>
@@ -659,7 +659,7 @@ async function saveZones() {
   if (!selectedCamId) return;
   const wpx = parseInt(document.getElementById('sWristPx').value) || 80;
   const triggerMode = document.getElementById('sTriggerMode').value;
-  await requestJson('PUT', `${API}/cameras/${encodeURIComponent(selectedCamId)}/zones`, {
+  const resp = await requestJson('PUT', `${API}/cameras/${encodeURIComponent(selectedCamId)}/zones`, {
     cashier_zone: cashierZone,
     customer_zone: [],
     wrist_px: wpx,
@@ -671,6 +671,12 @@ async function saveZones() {
     cameras[selectedCamId].trigger_mode = triggerMode;
   }
   updateZoneInfo();
+
+  // Show applied badge
+  const badge = document.getElementById('appliedBadge');
+  badge.textContent = `✓ Applied (${triggerMode === 'zone_intrusion' ? 'Zone Intrusion' : 'Wrist'})`;
+  badge.style.display = 'inline';
+  setTimeout(() => { badge.style.display = 'none'; }, 5000);
 }
 
 function onTriggerModeChange() {

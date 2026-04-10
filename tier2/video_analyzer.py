@@ -19,7 +19,7 @@ from tier2.agent_prompts import AGENT_PROMPTS
 
 logger = logging.getLogger(__name__)
 
-MAX_VLM_FRAMES = 12
+MAX_VLM_FRAMES = 10  # 12초 영상에서 ~1.2초 간격 샘플
 
 # Required fields per scenario for validation
 _CASH_FIELDS = {
@@ -58,7 +58,11 @@ class VideoAnalyzer:
             quantization_config=quant_config,
             device_map="auto",
         )
-        self.processor = AutoProcessor.from_pretrained(model_id)
+        self.processor = AutoProcessor.from_pretrained(
+            model_id,
+            min_pixels=128 * 28 * 28,
+            max_pixels=360 * 28 * 28,  # ~530×530, 지폐/카드 윤곽 구분 (~282K pixels)
+        )
         self.model.eval()
         logger.info("Qwen2.5-VL loaded (4-bit, ~2.8GB VRAM)")
 
