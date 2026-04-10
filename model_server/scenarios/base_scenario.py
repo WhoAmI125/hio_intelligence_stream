@@ -254,15 +254,22 @@ class CaptionAnalyzer:
                 'currency', 'dollar', 'won', 'coins',
                 'paying', 'payment', 'transaction',
                 'cash register', 'paper money', 'bill', 'bills',
+                # 추가: 거스름돈/지폐 변형 표현
+                'notes', 'change', 'cash payment',
             ],
             'moderate_positive': [
                 # 장소 신호 (카운터/프론트)
                 'counter', 'cashier', 'checkout',
                 'front desk', 'reception',
                 'drawer', 'receipt',
+                # Florence-2 로그에서 빈출하는 장소 (bank: 17804회, bank teller: 8040회)
+                'bank', 'bank teller', 'teller',
+                'store', 'lobby', 'customer',
                 # 손에 물체를 들고 있는 동작 (h2h 핵심)
                 'handing', 'holding', 'passing', 'reaching',
                 'exchanging', 'giving', 'receiving',
+                # 추가: 물건 놓기/집기 동작
+                'placing', 'picking',
                 # 지갑/소지품
                 'wallet', 'purse', 'envelope',
             ],
@@ -274,6 +281,19 @@ class CaptionAnalyzer:
                 'holding a brown', 'holding a white',
                 'holding something', 'handing something',
                 'passing something', 'giving something',
+                # 추가: Florence-2 로그 기반 미탐지 패턴
+                # "holding an object" 3794건, "holding a paper" 620건 미탐지
+                'holding an object', 'holding objects',
+                'holding a paper', 'holding papers',
+                'holding a cover', 'holding a file',
+                'holding a bag',
+                'handing an object', 'passing an object', 'giving an object',
+                'handing a paper', 'passing a paper',
+                # 추가: 색상 변형 (지폐 색상)
+                'holding a blue', 'holding a green', 'holding a red',
+                # 추가: 카운터 동작
+                'placing something', 'picking something', 'picking up',
+                'reaching across', 'receiving something',
                 # 지갑/주머니 동작
                 'reaching into wallet', 'pulling out wallet',
                 'taking out wallet', 'opening wallet',
@@ -306,6 +326,9 @@ class CaptionAnalyzer:
                 'phone', 'mobile',
                 'remote', 'remote control',
                 'small object', 'black object', 'object',
+                # 추가: Florence-2 로그에서 빈출하는 물체 힌트
+                'cover', 'bag', 'file', 'papers',
+                'yellow object', 'blue object', 'brown object',
             ],
             'negative': [
                 # phone/mobile 제거 — Florence-2가 현금을 "phone"으로 자주 오인
@@ -470,8 +493,10 @@ class CaptionAnalyzer:
 
         # H2H detection: location + action moderate combination also counts
         # (카운터에서 물건을 들고있으면 h2h로 판단 → Tier2가 현금/카드 판별)
-        _LOCATION_KEYWORDS = {'counter', 'cashier', 'checkout', 'front desk', 'reception', 'drawer'}
-        _ACTION_KEYWORDS = {'handing', 'holding', 'passing', 'reaching', 'exchanging', 'giving', 'receiving'}
+        _LOCATION_KEYWORDS = {'counter', 'cashier', 'checkout', 'front desk', 'reception', 'drawer',
+                              'bank', 'bank teller', 'teller', 'store', 'lobby'}
+        _ACTION_KEYWORDS = {'handing', 'holding', 'passing', 'reaching', 'exchanging', 'giving', 'receiving',
+                            'placing', 'picking'}
         has_location = bool(_LOCATION_KEYWORDS & set(moderate_matches))
         has_action = bool(_ACTION_KEYWORDS & set(moderate_matches))
         has_h2h = has_location and has_action
@@ -582,8 +607,10 @@ class CaptionAnalyzer:
         confidence = max(0.0, min(1.0, score))
 
         # H2H: location + action across frames
-        _LOCATION_KEYWORDS = {'counter', 'cashier', 'checkout', 'front desk', 'reception', 'drawer'}
-        _ACTION_KEYWORDS = {'handing', 'holding', 'passing', 'reaching', 'exchanging', 'giving', 'receiving'}
+        _LOCATION_KEYWORDS = {'counter', 'cashier', 'checkout', 'front desk', 'reception', 'drawer',
+                              'bank', 'bank teller', 'teller', 'store', 'lobby'}
+        _ACTION_KEYWORDS = {'handing', 'holding', 'passing', 'reaching', 'exchanging', 'giving', 'receiving',
+                            'placing', 'picking'}
         has_location = bool(_LOCATION_KEYWORDS & all_moderate)
         has_action = bool(_ACTION_KEYWORDS & all_moderate)
         has_h2h = has_location and has_action

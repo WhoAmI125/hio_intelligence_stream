@@ -1,0 +1,29 @@
+[Unit]
+Description=VLM Frontend Server (Jinja2 UI + Reverse Proxy)
+After=network.target vlm-model.service vlm-db.service
+
+[Service]
+Type=simple
+User=vlmapp
+Group=vlmapp
+WorkingDirectory=/home/ubuntu/hio_intelligence_stream
+Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+Environment=TZ=Asia/Seoul
+EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
+
+ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
+    frontend_server.main:app \
+    --host 127.0.0.1 \
+    --port 8002 \
+    --workers 2 \
+    --timeout-keep-alive 65 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vlm-frontend
+
+[Install]
+WantedBy=multi-user.target

@@ -147,7 +147,7 @@ class EvidenceRouter:
     DEFAULT_THRESHOLDS = {
         'fire': 0.60,
         'violence': 0.70,
-        'cash': 0.80,
+        'cash': 0.40,
     }
 
     # Priority order (higher priority events processed first)

@@ -1,0 +1,34 @@
+[Unit]
+Description=VLM Model Server (Florence-2 GPU + Tier-2 Pipeline)
+After=network.target
+Wants=vlm-db.service
+
+[Service]
+Type=simple
+User=vlmapp
+Group=vlmapp
+WorkingDirectory=/home/ubuntu/hio_intelligence_stream
+Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
+Environment=TZ=Asia/Seoul
+EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
+Environment=HF_HOME=/home/ubuntu/hio_intelligence_stream/models/hf
+Environment=HF_MODULES_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/modules
+Environment=TRANSFORMERS_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/transformers
+
+ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
+    model_server.main:app \
+    --host 127.0.0.1 \
+    --port 8000 \
+    --workers 1 \
+    --timeout-keep-alive 65 \
+    --log-level info
+
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=vlm-model
+SupplementaryGroups=video render
+
+[Install]
+WantedBy=multi-user.target

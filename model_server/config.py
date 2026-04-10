@@ -104,10 +104,10 @@ CASH_ROI_INFER_ENABLED = _env_bool("CASH_ROI_INFER_ENABLED", True)
 # Uncertainty Gate — tier2 escalation thresholds
 TIER2_FIRE_THRESHOLD = _env_float("TIER2_FIRE_THRESHOLD", 0.60)
 TIER2_VIOLENCE_THRESHOLD = _env_float("TIER2_VIOLENCE_THRESHOLD", 0.70)
-TIER2_CASH_THRESHOLD = _env_float("TIER2_CASH_THRESHOLD", 0.55)
+TIER2_CASH_THRESHOLD = _env_float("TIER2_CASH_THRESHOLD", 0.40)
 
 # Confidence + stability thresholds to skip Tier2
-SKIP_CONFIDENCE = _env_float("SKIP_CONFIDENCE", 0.85)
+SKIP_CONFIDENCE = _env_float("SKIP_CONFIDENCE", 0.90)
 SKIP_STABILITY = _env_float("SKIP_STABILITY", 0.90)
 
 # ---------------------------------------------------------------------------
