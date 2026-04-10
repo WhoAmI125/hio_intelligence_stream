@@ -405,6 +405,103 @@ async def camera_snapshot(cam_id: str):
     return StreamingResponse(iter([buf.tobytes()]), media_type="image/jpeg")
 
 
+@app.get("/api/cameras/{cam_id}/skeleton")
+async def camera_skeleton(cam_id: str):
+    """Snapshot with YOLO skeleton overlay. No extra GPU — reuses last YOLO result."""
+    reader = streams.get(cam_id)
+    if not reader:
+        return JSONResponse({"error": "camera not found"}, status_code=404)
+
+    frame, _ = reader.get_frame()
+    if frame is None:
+        return JSONResponse({"error": "no frame available"}, status_code=503)
+
+    cam_cfg = cam_configs.get(cam_id, {})
+
+    # Run YOLO on this frame (reuses existing model, ~5ms)
+    def _draw_skeleton(f, cfg):
+        if not cash_trigger:
+            return f
+        results = cash_trigger.model(f, verbose=False, half=cash_trigger._use_half)
+        kps = results[0].keypoints
+        boxes = results[0].boxes
+        if kps is None or kps.xy is None:
+            return f
+
+        vis = f.copy()
+        h, w = vis.shape[:2]
+
+        # Draw cashier zone if set
+        zone_norm = cfg.get("cashier_zone", [])
+        if len(zone_norm) >= 3:
+            import numpy as np
+            pts = np.array([[int(p[0] * w), int(p[1] * h)] for p in zone_norm], np.int32)
+            cv2.polylines(vis, [pts], True, (0, 200, 255), 2)
+            cv2.putText(vis, "CASHIER ZONE", (pts[0][0], max(pts[0][1] - 8, 16)),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 200, 255), 1)
+
+        # COCO skeleton connections
+        skeleton = [
+            (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # arms
+            (5, 11), (6, 12), (11, 12),  # torso
+            (11, 13), (13, 15), (12, 14), (14, 16),  # legs
+            (0, 1), (0, 2), (1, 3), (2, 4),  # face
+        ]
+        colors = {
+            "staff": (0, 255, 100),    # green
+            "customer": (255, 150, 0), # orange
+            "unknown": (200, 200, 200),  # gray
+        }
+
+        import numpy as np
+        zone_px = None
+        if len(zone_norm) >= 3:
+            zone_px = np.array([[int(p[0] * w), int(p[1] * h)] for p in zone_norm], np.int32)
+
+        for i, kp in enumerate(kps.xy):
+            kp_np = kp.cpu().numpy() if hasattr(kp, "cpu") else np.array(kp)
+
+            # Determine role
+            from tier1.cash_trigger import _best_position, _point_in_polygon
+            pos = _best_position(kp_np)
+            role = "unknown"
+            if zone_px is not None and pos is not None:
+                role = "staff" if _point_in_polygon(pos, zone_px) else "customer"
+            color = colors[role]
+
+            # Draw keypoints
+            for j, pt in enumerate(kp_np):
+                x, y = int(pt[0]), int(pt[1])
+                if x == 0 and y == 0:
+                    continue
+                r = 5 if j in (9, 10) else 3  # wrists bigger
+                cv2.circle(vis, (x, y), r, color, -1)
+
+            # Draw skeleton lines
+            for a, b in skeleton:
+                pa, pb = kp_np[a], kp_np[b]
+                if pa.sum() > 0 and pb.sum() > 0:
+                    cv2.line(vis, (int(pa[0]), int(pa[1])), (int(pb[0]), int(pb[1])), color, 1)
+
+            # Label
+            if pos is not None:
+                label = f"{role}[{i}]"
+                cv2.putText(vis, label, (int(pos[0]) - 20, int(pos[1]) - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.4, color, 1)
+
+        # Draw wrist distances
+        trigger_mode = cfg.get("trigger_mode", "wrist")
+        wrist_threshold = cfg.get("wrist_px", 250)
+        cv2.putText(vis, f"mode: {trigger_mode} | threshold: {wrist_threshold}px",
+                    (10, h - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (255, 255, 255), 1)
+
+        return vis
+
+    vis_frame = await asyncio.to_thread(_draw_skeleton, frame, cam_cfg)
+    _, buf = cv2.imencode(".jpg", vis_frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    return StreamingResponse(iter([buf.tobytes()]), media_type="image/jpeg")
+
+
 # ── API: MJPEG Stream ─────────────────────────────────────────────
 @app.get("/api/cameras/{cam_id}/mjpeg")
 async def camera_mjpeg(cam_id: str):

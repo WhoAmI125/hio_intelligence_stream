@@ -100,6 +100,19 @@ async def proxy_snapshot(cam_id: str):
         return JSONResponse({"error": "snapshot failed"}, status_code=502)
 
 
+@app.get("/api/proxy/skeleton/{cam_id}")
+async def proxy_skeleton(cam_id: str):
+    url = f"{MODEL_SERVER}/api/cameras/{cam_id}/skeleton"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(url)
+            if resp.status_code == 200:
+                return StreamingResponse(iter([resp.content]), media_type="image/jpeg")
+            return JSONResponse({"error": "skeleton failed"}, status_code=resp.status_code)
+    except Exception:
+        return JSONResponse({"error": "skeleton failed"}, status_code=502)
+
+
 @app.get("/api/proxy/clip-reviews")
 async def proxy_clip_reviews():
     url = f"{MODEL_SERVER}/api/clip-reviews"

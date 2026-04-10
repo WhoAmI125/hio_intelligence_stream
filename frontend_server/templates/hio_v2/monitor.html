@@ -119,6 +119,11 @@
             <canvas id="roiCanvas"></canvas>
           </div>
 
+          <div style="display:flex;align-items:center;gap:6px;margin-bottom:6px">
+            <button id="skelBtn" class="btn btn-sm" onclick="toggleSkeleton()" style="font-size:11px">🦴 Skeleton</button>
+            <span id="skelStatus" style="font-size:11px;color:var(--sub)"></span>
+          </div>
+
           <div class="zone-tools">
             <span class="note" style="font-weight:800">Cashier Zone</span>
             <button class="btn btn-sm" onclick="undoPoint()">Undo</button>
@@ -259,6 +264,8 @@ let selectedCamId = '';
 let pollTimer = null;
 let tier1Timer = null;
 let gridRendered = false;
+let skeletonMode = false;
+let skeletonTimer = null;
 
 // Polygon zone state — normalized [0-1] points
 let cashierZone = [];  // [[x,y], ...]
@@ -400,10 +407,50 @@ function openSettings(camId) {
 }
 
 function closeSettings() {
-  document.getElementById('setLive').src = '';  // Kills MJPEG connection
+  document.getElementById('setLive').src = '';
   document.getElementById('setModal').classList.remove('open');
   selectedCamId = '';
   if (tier1Timer) { clearInterval(tier1Timer); tier1Timer = null; }
+  if (skeletonTimer) { clearInterval(skeletonTimer); skeletonTimer = null; }
+  skeletonMode = false;
+}
+
+function toggleSkeleton() {
+  skeletonMode = !skeletonMode;
+  const btn = document.getElementById('skelBtn');
+  const status = document.getElementById('skelStatus');
+  const img = document.getElementById('setLive');
+  const canvas = document.getElementById('roiCanvas');
+
+  if (skeletonMode) {
+    btn.style.background = '#2563eb';
+    btn.style.color = '#fff';
+    status.textContent = 'Loading...';
+    canvas.style.display = 'none';  // hide ROI canvas during skeleton view
+
+    // Switch to skeleton polling (1.5s interval)
+    img.src = '';
+    const fetchSkeleton = () => {
+      if (!selectedCamId || !skeletonMode) return;
+      img.src = `${API}/skeleton/${encodeURIComponent(selectedCamId)}?t=${Date.now()}`;
+      status.textContent = 'Skeleton ON';
+    };
+    fetchSkeleton();
+    skeletonTimer = setInterval(fetchSkeleton, 1500);
+
+  } else {
+    btn.style.background = '';
+    btn.style.color = '';
+    status.textContent = '';
+    canvas.style.display = '';
+    if (skeletonTimer) { clearInterval(skeletonTimer); skeletonTimer = null; }
+
+    // Restore MJPEG
+    const cam = cameras[selectedCamId];
+    if (cam && cam.running) {
+      img.src = `${MJPEG_BASE}/${encodeURIComponent(selectedCamId)}/mjpeg`;
+    }
+  }
 }
 
 async function pollTier1() {
