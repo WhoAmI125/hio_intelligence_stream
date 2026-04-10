@@ -254,9 +254,12 @@ VLM이 "이 영역 안에서 캐셔와 고객 사이 거래가 이루어지고 �
 | 단계 | 로드 모델 | VRAM |
 |---|---|---|
 | 서버 시작 | YOLO (FP32) + CLIP + CUDA | ~4.0GB |
-| 평소 운영 | ↑ 동일 | ~3.55GB |
-| 첫 이벤트 트리거 | + Qwen2.5-VL-3B (4-bit NF4) | ~6.8GB |
-| **12GB GPU 여유** | | **~5.2GB** |
+| 평소 운영 | ↑ 동일 | ~4.0GB |
+| Qwen 모델 로드 | + Qwen2.5-VL-3B (4-bit NF4) | ~6.8GB |
+| Qwen 추론 피크 | + KV 캐시 + 입력 텐서 | ~12-13GB |
+
+> **알려진 이슈:** Qwen 비디오 입력 시 720p 원본 기준 토큰 생성으로
+> 추론 피크 VRAM이 높음. 프레임 수동 리사이즈로 개선 예정.
 
 ### 양자화 적용 내역
 | 모델 | 이전 | 이후 | 절감 | 적용 방식 |
@@ -314,16 +317,16 @@ hio_v2/                                      ~2,400 LOC
 ├── config.py                  (84)  # 환경변수 + YAML
 │
 ├── tier1/                             # Tier 1: 경량 트리거
-│   ├── cash_trigger.py       (150)  # YOLO-Pose wrist fallback + zone(보조) + all-pairs
+│   ├── cash_trigger.py       (200)  # YOLO-Pose wrist + zone_intrusion 2모드
 │   ├── clip_trigger.py        (87)  # CLIP ViT-L/14 zero-shot
 │   └── trigger_accumulator.py (79)  # 시간 윈도우 누적
 │
-├── tier2/                             # Tier 2: 로컬 VLM
-│   ├── video_analyzer.py     (140)  # Qwen2.5-VL-3B (Lock으로 직렬화)
-│   └── agent_prompts.py       (52)  # 시나리오별 5Q 프롬프트
+├── tier2/                             # Tier 2: 증거 추출기 (판정 안 함)
+│   ├── video_analyzer.py     (180)  # Qwen2.5-VL-3B 4-bit, 증거 슬롯 + JSON 파싱
+│   └── agent_prompts.py      (110)  # cash=6슬롯 증거, fire/violence=5Q
 │
-├── tier3/                             # Tier 3: 클라우드 독립 검증
-│   └── tier3_verifier.py      (95)  # Gemini 풀 12프레임 독립판단
+├── tier3/                             # Tier 3: Hard Gate 최종 판정
+│   └── tier3_verifier.py     (260)  # Gemini Hard Gate 3단 + UNCERTAIN + 서버 강제
 │
 ├── stream/                            # RTSP 스트림
 │   ├── stream_reader.py      (200)  # cv2 + 720p + burst + MJPEG 10fps
@@ -341,7 +344,7 @@ hio_v2/                                      ~2,400 LOC
 │   ├── main.py               (230)  # FastAPI + Jinja2 + 프록시 + /media
 │   └── templates/hio_v2/
 │       ├── base_public.html           # 사이드바 레이아웃
-│       ├── monitor.html               # 카메라 그리드 + 존 에디터 + Tier 1 라이브
+│       ├── monitor.html               # 카메라 그리드 + 존 에디터 + Skeleton 오버레이 + Tier 1 라이브
 │       ├── events.html                # 이벤트 로그 (필터 + 디테일 모달 + 미디어)
 │       ├── tier1_logs.html            # 트리거 이력 (임계값 초과만)
 │       ├── tier2_logs.html            # Tier 2 + Tier 3 전체 reason
@@ -365,7 +368,13 @@ hio_v2/                                      ~2,400 LOC
 
 ### CCTV Monitor (`/monitor`)
 - 카메라 그리드 (스냅샷 5초 폴링)
-- 설정 모달: 스냅샷 라이브(1초) + 폴리곤 존 에디터 + Tier 1 라이브(Cash/Fire/Violence) + Latest inference 한줄
+- 설정 모달:
+  - MJPEG 라이브 (10fps 직접)
+  - 🦴 **Skeleton 토글** — YOLO 키포인트 오버레이 (1.5초 폴링, 추가 GPU 0)
+    - 초록=staff, 주황=customer, 손목 강조, 스켈레톤 연결선
+    - 캐셔존 + trigger_mode + threshold 표시
+  - 폴리곤 존 에디터 + **Trigger Mode 선택** (같은 줄에서 Apply)
+  - Tier 1 라이브 (Cash/Fire/Violence) + Accumulator
 
 ### Events (`/events`)
 - 필터 (카메라, 시나리오, 페이지당)
@@ -397,11 +406,12 @@ hio_v2/                                      ~2,400 LOC
 | POST | `/api/cameras/{id}/start` | 카메라 추가 + DB 저장 |
 | POST | `/api/cameras/{id}/stop` | 중지 (DB 유지) |
 | DELETE | `/api/cameras/{id}` | 완전 삭제 |
-| PUT | `/api/cameras/{id}/zones` | Cashier Zone 폴리곤 저장 |
+| PUT | `/api/cameras/{id}/zones` | Cashier Zone + Trigger Mode + Wrist Threshold 저장 |
 | GET | `/api/cameras/{id}/tier1` | 실시간 Tier 1 (디버그 포함) |
 | GET | `/api/cameras/{id}/tier1/history` | 추론 이력 (200건) |
 | GET | `/api/cameras/{id}/snapshot` | JPEG 스냅샷 |
-| GET | `/api/cameras/{id}/mjpeg` | MJPEG 스트림 (5 FPS) |
+| GET | `/api/cameras/{id}/skeleton` | YOLO 스켈레톤 오버레이 스냅샷 (추가 GPU 0) |
+| GET | `/api/cameras/{id}/mjpeg` | MJPEG 스트림 (10 FPS) |
 | POST | `/api/clip-review` | MP4 → 3시나리오 Tier 1/2/3 평가 (DB 저장) |
 | GET | `/api/clip-reviews` | Clip review 이력 조회 |
 | GET | `/api/events` | 이벤트 조회 |
