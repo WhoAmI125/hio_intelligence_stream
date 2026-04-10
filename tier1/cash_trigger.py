@@ -22,7 +22,7 @@ class CashTrigger:
 
     def __init__(self, model_path: str | None = None):
         self.model = YOLO(model_path or config.YOLO_MODEL)
-        self._use_half = True
+        self._use_half = False  # FP16 disabled — causes CUDA assert with concurrent CLIP
         logger.info("CashTrigger loaded (FP16): %s", model_path or config.YOLO_MODEL)
 
     def detect(self, frame: np.ndarray, cam_config: dict) -> dict:

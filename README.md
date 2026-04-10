@@ -56,7 +56,7 @@ RTSP Cameras (720p~1440p, 25-30fps)
 │  ├ text prompts vs 프레임 유사도                      │
 │  └ positive score > threshold? → 플래그               │
 │                                                      │
-│  ※ YOLO FP16 + ThreadPoolExecutor 4워커 병렬          │
+│  ※ YOLO FP32 + ThreadPoolExecutor 4워커 병렬           │
 │  ※ Trigger 감지 시 Burst Mode (3초간 4 FPS)          │
 └──────────────────────┬───────────────────────────────┘
                        │ 플래그 (~5-15%)
@@ -253,20 +253,20 @@ VLM이 "이 영역 안에서 캐셔와 고객 사이 거래가 이루어지고 �
 
 | 단계 | 로드 모델 | VRAM |
 |---|---|---|
-| 서버 시작 | YOLO (FP16) + CLIP + CUDA | ~3.55GB |
+| 서버 시작 | YOLO (FP32) + CLIP + CUDA | ~4.0GB |
 | 평소 운영 | ↑ 동일 | ~3.55GB |
-| 첫 이벤트 트리거 | + Qwen2.5-VL-3B (4-bit NF4) | ~6.35GB |
-| **12GB GPU 여유** | | **~5.65GB** |
+| 첫 이벤트 트리거 | + Qwen2.5-VL-3B (4-bit NF4) | ~6.8GB |
+| **12GB GPU 여유** | | **~5.2GB** |
 
 ### 양자화 적용 내역
 | 모델 | 이전 | 이후 | 절감 | 적용 방식 |
 |------|------|------|------|----------|
-| YOLO-Pose | FP32 (~1GB) | **FP16** (~550MB) | -450MB, 추론 30% 빠름 | `model(frame, half=True)` 추론 시 변환 |
+| YOLO-Pose | FP32 (~1GB) | **FP32 유지** | — | FP16은 CLIP 동시 실행 시 CUDA assert 발생 → 비활성화 |
 | Qwen2.5-VL-3B | auto/BF16 (~7-9GB) | **4-bit NF4** (~2.8GB) | -4~6GB, 정확도 1-3% 감소 | `BitsAndBytesConfig(load_in_4bit=True)` |
 | CLIP ViT-L/14 | FP32 (~1.5GB) | 변경 없음 | — | — |
 
-> **참고:** YOLO FP16은 `model.model.half()` 직접 호출 시 fuse 단계에서 dtype 충돌 발생.
-> ultralytics의 `half=True` 파라미터를 사용해야 내부적으로 올바른 순서(fuse → half)로 처리됨.
+> **참고:** YOLO FP16(`half=True`)은 ThreadPoolExecutor에서 CLIP과 동시 GPU 접근 시
+> CUDA device-side assert를 유발하여 전체 GPU 컨텍스트가 오염됨. FP32로 유지.
 
 ---
 
@@ -601,7 +601,7 @@ http://localhost:8002
 | VLM 입력 | 12프레임 JPEG 메모리 전달 | **저장된 MP4 파일 경로 전달** (Lazy Pipeline) |
 | Qwen 입력 | 임시 JPEG 12장 생성→삭제 | **MP4에서 OpenCV 12프레임 샘플 → PIL → processor** |
 | Gemini 입력 | base64 이미지 12장 API 전송 | **MP4 파일 업로드** (client.files.upload) |
-| YOLO 정밀도 | FP32 (~1GB) | **FP16** (~550MB, 추론 30% 빠름) |
+| YOLO 정밀도 | FP32 (~1GB) | **FP32 유지** (FP16은 CLIP 동시 실행 시 CUDA assert) |
 | Qwen 양자화 | auto/BF16 (~7-9GB) | **4-bit NF4** (~2.8GB, BitsAndBytes) |
 | VRAM 합계 | ~13GB (12GB GPU에서 OOM) | **~6.35GB** (5.65GB 여유) |
 | 이벤트 파이프라인 | `_qwen_lock`이 전체 감싸 (20~50초) | 3-Phase: 클립저장→Lock(Qwen만)→Tier3+DB |

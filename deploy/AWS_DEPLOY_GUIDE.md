@@ -16,9 +16,9 @@
 
 | 단계 | VRAM |
 |------|------|
-| YOLO FP16 + CLIP + CUDA | ~3.55GB |
-| + Qwen 4-bit NF4 (이벤트 시) | ~6.35GB |
-| **여유** | **~9.65GB** |
+| YOLO FP32 + CLIP + CUDA | ~4.0GB |
+| + Qwen 4-bit NF4 (이벤트 시) | ~6.8GB |
+| **여유** | **~9.2GB** |
 
 ---
 
