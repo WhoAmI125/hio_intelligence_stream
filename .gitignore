@@ -1,0 +1,49 @@
+# Environment & secrets
+.env
+configs/cameras.yaml
+
+# Database
+db/
+data/events.db
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Model weights
+*.pt
+*.pth
+*.bin
+*.safetensors
+*.onnx
+models/
+
+# Data (runtime — clips, thumbnails, logs, review frames)
+data/clips/
+data/thumbnails/
+data/logs/
+data/events/
+data/review_frames/
+data/manual_review_*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+.cursor/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Temp
+*.tmp
+*.bak

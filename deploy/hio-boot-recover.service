@@ -1,0 +1,12 @@
+[Unit]
+Description=HiO v2 Boot Recovery (safe ordered startup)
+After=multi-user.target
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/home/ubuntu/hio_v2/deploy/hio-safe-recover.sh boot-start
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

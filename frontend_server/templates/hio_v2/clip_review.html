@@ -1,0 +1,189 @@
+{% extends "hio_v2/base_public.html" %}
+{% block title %}Clip Review — HiO v2{% endblock %}
+{% block page_title %}Clip Review{% endblock %}
+{% block page_subtitle %}MP4 업로드 → 3개 시나리오 전부 Tier 1/2/3 자동 평가{% endblock %}
+
+{% block extra_css %}
+<style>
+  .upload-zone { border:2px dashed var(--line); border-radius:12px; padding:40px; text-align:center; background:#fafcff; cursor:pointer; transition:0.2s; }
+  .upload-zone:hover,.upload-zone.dragging { border-color:var(--accent); background:#f0f7ff; }
+  .result-section { margin-top:14px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .result-head { padding:10px 14px; background:#f5f9ff; border-bottom:1px solid var(--line); font-weight:800; font-size:13px; color:#2f4767; }
+  .result-body { padding:14px; font-size:13px; line-height:1.6; }
+  .scenario-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin-top:14px; }
+  .scenario-card { border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .scenario-head { padding:8px 12px; font-weight:800; font-size:13px; border-bottom:1px solid var(--line); }
+  .scenario-body { padding:12px; font-size:12px; line-height:1.6; }
+  .row { display:flex; justify-content:space-between; margin-bottom:4px; }
+  .row .k { color:var(--sub); font-weight:700; }
+  .row .v { font-weight:800; }
+  .badge { display:inline-flex; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; }
+  .badge-ok { color:#145c39; background:#ddf9eb; }
+  .badge-bad { color:#952045; background:#ffe8ef; }
+  .badge-warn { color:#7f5600; background:#fff3de; }
+  .badge-info { color:#1d67d7; background:#ecf5ff; }
+  .reason-text { margin-top:6px; padding:8px; background:#f9fcff; border:1px solid var(--line); border-radius:6px; font-size:12px; line-height:1.5; white-space:pre-wrap; }
+  pre.json { background:#f5f9ff; border:1px solid var(--line); border-radius:8px; padding:10px; font-size:11px; max-height:300px; overflow:auto; white-space:pre-wrap; }
+  @media(max-width:900px) { .scenario-grid { grid-template-columns:1fr; } }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="upload-zone" id="uploadZone" onclick="document.getElementById('clipInput').click()">
+  <input id="clipInput" type="file" accept=".mp4,video/mp4" style="display:none" onchange="analyzeClip()" />
+  <div style="font-size:14px;font-weight:700;margin-bottom:6px">Drop MP4 here or click to upload</div>
+  <div class="note">클립을 업로드하면 Cash · Fire · Violence 3개 시나리오 전부 자동 평가합니다</div>
+</div>
+<div id="statusText" class="note" style="margin-top:8px"></div>
+
+<div id="resultArea" style="display:none">
+  <!-- Clip Meta -->
+  <div class="result-section">
+    <div class="result-head">Clip Info</div>
+    <div class="result-body" id="clipMeta"></div>
+  </div>
+
+  <!-- Tier 1: all scenarios -->
+  <div class="result-section">
+    <div class="result-head">Tier 1 Results (single frame)</div>
+    <div class="result-body" id="tier1Box"></div>
+  </div>
+
+  <!-- Per-scenario Tier 2 + 3 -->
+  <div class="scenario-grid" id="scenarioGrid"></div>
+
+  <!-- Raw JSON -->
+  <div class="result-section" style="margin-top:14px">
+    <div class="result-head">Raw JSON</div>
+    <div class="result-body"><pre class="json" id="rawJson"></pre></div>
+  </div>
+</div>
+
+<!-- Saved History -->
+<div id="historySection" style="margin-top:16px;display:none">
+  <div class="result-section">
+    <div class="result-head">Review History (saved)</div>
+    <div class="result-body" style="overflow-x:auto">
+      <table style="font-size:12px;width:100%">
+        <thead><tr><th>#</th><th>File</th><th>Time</th><th>Cash</th><th>Fire</th><th>Violence</th></tr></thead>
+        <tbody id="historyBody"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// Load saved reviews on page load
+async function loadSavedReviews() {
+  try {
+    const data = await (await fetch('/api/proxy/clip-reviews')).json();
+    const reviews = data.reviews || [];
+    if (!reviews.length) return;
+    document.getElementById('historySection').style.display = 'block';
+    document.getElementById('historyBody').innerHTML = reviews.map((r, i) => {
+      const res = r.result || {};
+      const scenarios = res.scenarios || {};
+      const cash = scenarios.cash?.tier2 || {};
+      const fire = scenarios.fire?.tier2 || {};
+      const viol = scenarios.violence?.tier2 || {};
+      return `<tr>
+        <td>${i+1}</td>
+        <td>${r.filename || '?'}</td>
+        <td>${r.created_at || '?'}</td>
+        <td style="color:${cash.detected?'#dc2626':'#16a34a'}">${cash.detected?'YES':'NO'} ${((cash.confidence||0)*100).toFixed(0)}%</td>
+        <td style="color:${fire.detected?'#dc2626':'#16a34a'}">${((fire.confidence||0)*100).toFixed(0)}%</td>
+        <td style="color:${viol.detected?'#dc2626':'#16a34a'}">${((viol.confidence||0)*100).toFixed(0)}%</td>
+      </tr>`;
+    }).join('');
+  } catch(e) {}
+}
+loadSavedReviews();
+
+const zone = document.getElementById('uploadZone');
+zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('dragging'); });
+zone.addEventListener('dragleave', () => zone.classList.remove('dragging'));
+zone.addEventListener('drop', e => {
+  e.preventDefault(); zone.classList.remove('dragging');
+  if (e.dataTransfer.files[0]) { document.getElementById('clipInput').files = e.dataTransfer.files; analyzeClip(); }
+});
+
+async function analyzeClip() {
+  const file = document.getElementById('clipInput').files[0];
+  if (!file) return;
+  document.getElementById('statusText').textContent = 'Analyzing all scenarios... (Tier 2 may take 30-60s)';
+
+  const form = new FormData();
+  form.append('clip', file);
+
+  try {
+    const res = await fetch('/api/proxy/clip-review', { method: 'POST', body: form });
+    const data = await res.json();
+
+    if (data.error) { document.getElementById('statusText').textContent = 'Error: ' + data.error; return; }
+
+    document.getElementById('resultArea').style.display = 'block';
+    document.getElementById('statusText').textContent = 'Done';
+
+    // Meta
+    document.getElementById('clipMeta').innerHTML =
+      `File: <b>${data.filename}</b> | Total frames: ${data.total_frames} | Sampled: ${data.sampled_frames}`;
+
+    // Tier 1
+    const t1 = data.tier1 || {};
+    const cash = t1.cash || {};
+    const fire = t1.fire || {};
+    const viol = t1.violence || {};
+    document.getElementById('tier1Box').innerHTML = `
+      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px">
+        <div>
+          <b>Cash (YOLO-Pose)</b><br>
+          <span class="badge ${cash.triggered?'badge-bad':'badge-ok'}">${cash.triggered?'TRIGGERED':'CLEAR'}</span>
+          <div class="note" style="margin-top:4px">persons:${cash.persons_detected||0} staff:${cash.staff_count||0} cust:${cash.customer_count||0} dist:${cash.min_distance!=null?cash.min_distance.toFixed(0)+'px':'—'}</div>
+        </div>
+        <div>
+          <b>Fire (CLIP)</b><br>
+          <span class="badge ${fire.triggered?'badge-bad':'badge-ok'}">${((fire.score||0)*100).toFixed(1)}%</span>
+        </div>
+        <div>
+          <b>Violence (CLIP)</b><br>
+          <span class="badge ${viol.triggered?'badge-bad':'badge-ok'}">${((viol.score||0)*100).toFixed(1)}%</span>
+        </div>
+      </div>`;
+
+    // Per-scenario Tier 2 + 3
+    const scenarios = data.scenarios || {};
+    const scenColors = { cash: ['var(--accent)','#ecf5ff'], fire: ['var(--warn)','#fff3de'], violence: ['var(--bad)','#ffe8ef'] };
+    document.getElementById('scenarioGrid').innerHTML = ['cash','fire','violence'].map(s => {
+      const sc = scenarios[s] || {};
+      const t2 = sc.tier2 || {};
+      const t3 = sc.tier3 || {};
+      const [clr, bg] = scenColors[s];
+      const conf = ((t2.confidence||0)*100).toFixed(0);
+      const routing = sc.routing || '—';
+      const routeBadge = routing === 'alert' ? 'badge-ok' : routing === 'tier3' ? 'badge-warn' : 'badge-bad';
+
+      return `<div class="scenario-card">
+        <div class="scenario-head" style="background:${bg};color:${clr}">${s.toUpperCase()}</div>
+        <div class="scenario-body">
+          <div class="row"><span class="k">Tier 2 Detected</span><span class="v badge ${t2.detected?'badge-bad':'badge-ok'}">${t2.detected?'YES':'NO'}</span></div>
+          <div class="row"><span class="k">Confidence</span><span class="v">${conf}%</span></div>
+          <div class="row"><span class="k">Yes Count</span><span class="v">${t2.yes_count||0}/5</span></div>
+          <div class="row"><span class="k">Routing</span><span class="badge ${routeBadge}">${routing}</span></div>
+          <div class="reason-text"><b>Tier 2 Reason:</b><br>${t2.reason||'—'}</div>
+          <div style="margin-top:8px">
+            <div class="row"><span class="k">Tier 3 Verdict</span><span class="badge ${t3.verdict==='CONFIRMED'?'badge-ok':t3.verdict==='FALSE_ALARM'?'badge-bad':'badge-info'}">${t3.verdict||'—'}</span></div>
+            ${t3.reason ? `<div class="reason-text"><b>Tier 3 Reason:</b><br>${t3.reason}</div>` : ''}
+          </div>
+        </div>
+      </div>`;
+    }).join('');
+
+    document.getElementById('rawJson').textContent = JSON.stringify(data, null, 2);
+  } catch(e) {
+    document.getElementById('statusText').textContent = 'Error: ' + e.message;
+  }
+}
+</script>
+{% endblock %}

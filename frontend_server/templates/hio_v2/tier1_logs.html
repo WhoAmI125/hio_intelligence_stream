@@ -1,0 +1,171 @@
+{% extends "hio_v2/base_public.html" %}
+{% block title %}Tier 1 Logs — HiO v2{% endblock %}
+{% block page_title %}Tier 1: Trigger Logs{% endblock %}
+{% block page_subtitle %}임계값을 넘은 트리거만 기록. YOLO-Pose (cash) + CLIP (fire/violence){% endblock %}
+
+{% block top_actions %}
+<select id="camFilter" class="btn" onchange="loadAll()"><option value="">All Cameras</option></select>
+<select id="scenarioFilter" class="btn" onchange="filterTable()">
+  <option value="">All</option><option value="cash">Cash</option><option value="fire">Fire</option><option value="violence">Violence</option>
+</select>
+<button class="btn" onclick="loadAll()">Refresh</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .stat-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(180px,1fr)); gap:10px; margin-bottom:16px; }
+  .stat-card { border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .stat-label { font-size:11px; color:var(--sub); font-weight:700; }
+  .stat-value { font-size:26px; font-weight:800; margin-top:2px; }
+  .log-table { font-size:12px; }
+  .log-table th { position:sticky; top:0; background:var(--card); z-index:1; }
+  .scroll-wrap { max-height:calc(100vh - 340px); overflow-y:auto; }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Stats -->
+<div class="stat-grid" id="statsGrid">
+  <div class="stat-card"><div class="stat-label">Cash Triggers</div><div class="stat-value" id="statCash" style="color:var(--accent)">0</div></div>
+  <div class="stat-card"><div class="stat-label">Fire Triggers</div><div class="stat-value" id="statFire" style="color:var(--warn)">0</div></div>
+  <div class="stat-card"><div class="stat-label">Violence Triggers</div><div class="stat-value" id="statViol" style="color:var(--bad)">0</div></div>
+  <div class="stat-card"><div class="stat-label">Total Logged</div><div class="stat-value" id="statTotal">0</div></div>
+</div>
+
+<!-- Model Status -->
+<div style="display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px" id="modelCards"></div>
+
+<!-- Trigger Log Table -->
+<div class="scroll-wrap">
+  <table class="log-table">
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Camera</th>
+        <th>Scenario</th>
+        <th>Detail</th>
+        <th>Accum</th>
+      </tr>
+    </thead>
+    <tbody id="logBody">
+      <tr><td colspan="5" style="text-align:center;color:var(--sub);padding:30px">Waiting for triggers...</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let allLogs = [];
+let pollTimer = null;
+
+async function loadAll() {
+  // Load camera list for filter
+  const statusData = await (await fetch('/api/proxy/status')).json();
+  const camSelect = document.getElementById('camFilter');
+  const cams = Object.keys(statusData.cameras || {});
+  if (camSelect.options.length <= 1) {
+    cams.forEach(c => { const o = document.createElement('option'); o.value = c; o.textContent = c; camSelect.appendChild(o); });
+  }
+
+  // Model status cards
+  const m = statusData.models || {};
+  document.getElementById('modelCards').innerHTML = [
+    ['YOLO-Pose (Cash)', m.tier1_cash],
+    ['CLIP ViT-L/14', m.tier1_clip],
+    ['Qwen2.5-VL-3B', m.tier2_qwen],
+  ].map(([name, ok]) =>
+    `<div style="border:1px solid ${ok?'#c2e8d4':'#f3b9c8'};border-radius:8px;padding:8px 12px;background:${ok?'#eefaf3':'#fff0f4'};font-size:12px">
+      <b>${name}</b>: <span style="color:${ok?'var(--ok)':'var(--bad)'}">${ok?'Loaded':'Not loaded'}</span>
+    </div>`
+  ).join('');
+
+  // Load history for each camera
+  const camFilter = document.getElementById('camFilter').value;
+  const targets = camFilter ? [camFilter] : cams;
+
+  for (const cam of targets) {
+    try {
+      const data = await (await fetch(`/api/proxy/cameras/${encodeURIComponent(cam)}/tier1/history?limit=200`)).json();
+      const logs = data.logs || [];
+
+      // Only keep triggered entries
+      logs.forEach(l => {
+        if (l.cash_triggered) {
+          addLog(cam, 'cash', l);
+        }
+        if (l.fire_triggered) {
+          addLog(cam, 'fire', l);
+        }
+        if (l.violence_triggered) {
+          addLog(cam, 'violence', l);
+        }
+      });
+    } catch(e) {}
+  }
+
+  updateStats();
+  filterTable();
+}
+
+function addLog(cam, scenario, entry) {
+  const key = `${cam}_${scenario}_${entry.timestamp}`;
+  if (allLogs.find(l => l.key === key)) return;
+
+  let detail = '';
+  if (scenario === 'cash') {
+    detail = `staff:${entry.cash_staff||0} cust:${entry.cash_cust||0} dist:${entry.cash_min_dist != null ? entry.cash_min_dist.toFixed(0)+'px' : '—'}`;
+  } else if (scenario === 'fire') {
+    detail = `score: ${((entry.fire_score||0)*100).toFixed(1)}% (th:25%)`;
+  } else {
+    detail = `score: ${((entry.violence_score||0)*100).toFixed(1)}% (th:30%)`;
+  }
+
+  const acc = entry.accumulator || {};
+  allLogs.unshift({
+    key,
+    cam,
+    scenario,
+    timestamp: entry.timestamp,
+    detail,
+    accum: `c:${acc.cash||0}/2 f:${acc.fire||0}/2 v:${acc.violence||0}/2`,
+  });
+
+  // Cap at 500
+  if (allLogs.length > 500) allLogs.length = 500;
+}
+
+function updateStats() {
+  document.getElementById('statCash').textContent = allLogs.filter(l => l.scenario === 'cash').length;
+  document.getElementById('statFire').textContent = allLogs.filter(l => l.scenario === 'fire').length;
+  document.getElementById('statViol').textContent = allLogs.filter(l => l.scenario === 'violence').length;
+  document.getElementById('statTotal').textContent = allLogs.length;
+}
+
+function filterTable() {
+  const scenario = document.getElementById('scenarioFilter').value;
+  const filtered = scenario ? allLogs.filter(l => l.scenario === scenario) : allLogs;
+  const tbody = document.getElementById('logBody');
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--sub);padding:30px">No triggers above threshold yet</td></tr>';
+    return;
+  }
+
+  const colors = { cash: 'var(--accent)', fire: 'var(--warn)', violence: 'var(--bad)' };
+  tbody.innerHTML = filtered.slice(0, 100).map(l => {
+    const t = new Date(l.timestamp).toLocaleString('ko-KR');
+    return `<tr>
+      <td>${t}</td>
+      <td>${l.cam}</td>
+      <td><span class="badge" style="background:${colors[l.scenario]}22;color:${colors[l.scenario]};border:1px solid ${colors[l.scenario]}44">${l.scenario.toUpperCase()}</span></td>
+      <td>${l.detail}</td>
+      <td style="font-size:11px;color:var(--sub)">${l.accum}</td>
+    </tr>`;
+  }).join('');
+}
+
+loadAll();
+pollTimer = setInterval(loadAll, 3000);
+</script>
+{% endblock %}

@@ -1,0 +1,20 @@
+[Unit]
+Description=HiO v2 Frontend Server (UI + Proxy)
+After=hio-model.service
+Requires=hio-model.service
+
+[Service]
+Type=simple
+User=hioapp
+Group=hioapp
+WorkingDirectory=/home/ubuntu/hio_v2
+ExecStart=/home/ubuntu/hio_v2/venv/bin/uvicorn frontend_server.main:app --host 127.0.0.1 --port 8002 --workers 2
+Environment=TZ=Asia/Seoul
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hio-frontend
+
+[Install]
+WantedBy=multi-user.target

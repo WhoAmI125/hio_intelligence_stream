@@ -1,0 +1,735 @@
+{% extends "hio_v2/base_public.html" %}
+{% block title %}CCTV Monitor — HiO v2{% endblock %}
+{% block page_title %}CCTV Live Monitor{% endblock %}
+{% block page_subtitle %}Click a camera card to open settings. Add cameras with RTSP URL.{% endblock %}
+
+{% block top_actions %}
+<span id="globalStatus" class="badge badge-warn" style="padding:6px 12px;border-radius:999px;font-weight:800">0 RUNNING</span>
+<button class="btn btn-primary" onclick="openAddModal()">+ Add Camera</button>
+<button class="btn" onclick="stopAll()">Stop All</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(340px,1fr)); gap:12px; }
+  .cam-card {
+    border:1px solid var(--line); border-radius:13px; overflow:hidden; background:#fff;
+    cursor:pointer; box-shadow:0 10px 22px rgba(12,29,54,0.08);
+    transition:transform .16s, box-shadow .16s;
+  }
+  .cam-card:hover { transform:translateY(-2px); box-shadow:0 16px 32px rgba(12,29,54,0.12); }
+  .cam-thumb { position:relative; background:#101a2d; min-height:198px; }
+  .cam-live { width:100%; height:100%; object-fit:cover; display:block; }
+  .cam-overlay {
+    position:absolute; inset:0;
+    background:linear-gradient(to top,rgba(7,13,24,.72),rgba(7,13,24,.1) 40%,rgba(7,13,24,.08));
+    display:flex; flex-direction:column; justify-content:space-between; pointer-events:none;
+  }
+  .cam-top { padding:9px 10px; display:flex; justify-content:space-between; align-items:center; }
+  .cam-name { color:#f3f7ff; font-weight:800; font-size:13px; text-shadow:0 2px 8px rgba(0,0,0,.35); }
+  .cam-foot { border-top:1px solid var(--line); padding:8px 10px; display:flex; justify-content:space-between; align-items:center; }
+  .cam-meta { font-size:12px; color:var(--sub); }
+  .pill { display:inline-flex; padding:4px 10px; border-radius:999px; font-size:11px; font-weight:800; }
+  .pill-ok { color:#0f7e4d; border:1px solid #9ed9bc; background:#eefaf3; }
+  .pill-warn { color:#8d5a05; border:1px solid #efd39e; background:#fff7e8; }
+  .empty { border:1px dashed #bfd0e8; border-radius:14px; padding:28px; text-align:center; color:#456085; background:#f7fbff; }
+
+  .modal { display:none; position:fixed; inset:0; z-index:3000; background:rgba(10,17,31,.55); align-items:center; justify-content:center; padding:10px; }
+  .modal.open { display:flex; }
+  .modal-card { width:min(1360px,99vw); max-height:96vh; overflow:hidden; border-radius:14px; background:#fff; border:1px solid var(--line); box-shadow:0 24px 62px rgba(9,17,31,.32); display:flex; flex-direction:column; }
+  .modal-head { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; }
+  .modal-title { font-size:14px; font-weight:800; }
+  .modal-body { padding:12px 14px; overflow:auto; }
+  .modal-grid { display:grid; grid-template-columns:1.7fr 1fr; gap:12px; }
+
+  .live-wrap { position:relative; border-radius:12px; overflow:hidden; background:#0f182a; aspect-ratio:16/9; user-select:none; }
+  .live-wrap img { width:100%; height:100%; object-fit:contain; display:block; }
+  #roiCanvas { position:absolute; inset:0; width:100%; height:100%; cursor:crosshair; z-index:4; }
+
+  .status-box { margin-top:10px; border:1px solid var(--line); border-radius:10px; overflow:hidden; }
+  .status-row { display:grid; grid-template-columns:110px minmax(0,1fr); border-top:1px solid var(--line); }
+  .status-row:first-child { border-top:none; }
+  .status-k,.status-v { padding:7px 9px; font-size:12px; }
+  .status-k { background:#f5f9ff; color:#2f4767; font-weight:800; }
+  .status-v { color:#1d314a; }
+
+  .fields { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .field { display:flex; flex-direction:column; gap:4px; }
+  .field.full { grid-column:span 2; }
+  .field label { font-size:12px; color:var(--sub); font-weight:700; }
+  .field input { border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:13px; outline:none; color:var(--text); }
+  .actions { margin-top:10px; display:flex; flex-wrap:wrap; gap:6px; }
+  .btn-sm { padding:6px 10px; font-size:12px; border-radius:8px; }
+  .btn-danger { color:#94173e; border-color:#f1b8c7; background:#fff2f6; }
+  .note { font-size:12px; color:var(--sub); }
+
+  .zone-tools { display:flex; align-items:center; gap:6px; flex-wrap:wrap; margin-top:10px; }
+  .zone-tools .note { font-weight:700; }
+
+  @media (max-width:980px) {
+    .modal-grid { grid-template-columns:1fr; }
+    .fields { grid-template-columns:1fr; }
+    .field.full { grid-column:span 1; }
+  }
+</style>
+{% endblock %}
+
+{% block content %}
+<section id="camGrid" class="grid"></section>
+<div id="emptyState" class="empty" style="display:none;">
+  <div style="font-weight:800;margin-bottom:8px;">등록된 카메라가 없습니다.</div>
+  <div class="note" style="margin-bottom:12px;">+ Add Camera로 RTSP URL을 입력하면 카메라가 추가됩니다.</div>
+  <button class="btn btn-primary" onclick="openAddModal()">+ Add Camera</button>
+</div>
+
+<!-- Add Camera Modal -->
+<div id="addModal" class="modal">
+  <div class="modal-card" style="max-width:520px;">
+    <div class="modal-head">
+      <div class="modal-title">Add Camera</div>
+      <button class="btn btn-sm" onclick="closeAddModal()">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="fields">
+        <div class="field"><label>Camera ID</label><input id="aCamId" placeholder="lobby_cam_1" /></div>
+        <div class="field"><label>Wrist Threshold (px)</label><input id="aWristPx" value="80" /></div>
+        <div class="field full"><label>RTSP URL</label><input id="aRtsp" placeholder="rtsp://user:pass@ip:554/stream" /></div>
+      </div>
+      <div class="actions">
+        <button class="btn btn-primary" onclick="addCamera(true)">Save + Start</button>
+        <button class="btn" onclick="addCamera(false)">Save Only</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Settings Modal -->
+<div id="setModal" class="modal">
+  <div class="modal-card">
+    <div class="modal-head">
+      <div class="modal-title" id="setTitle">Camera Settings</div>
+      <button class="btn btn-sm" onclick="closeSettings()">Close</button>
+    </div>
+    <div class="modal-body">
+      <div class="modal-grid">
+        <!-- Left: Live + ROI Canvas -->
+        <section>
+          <div class="live-wrap" id="setLiveWrap">
+            <img id="setLive" alt="live" />
+            <canvas id="roiCanvas"></canvas>
+          </div>
+
+          <div class="zone-tools">
+            <span class="note" style="font-weight:800">Cashier Zone</span>
+            <button class="btn btn-sm" onclick="undoPoint()">Undo</button>
+            <button class="btn btn-sm" onclick="clearZone()">Clear</button>
+            <button class="btn btn-sm btn-primary" onclick="saveZones()">Apply</button>
+            <span class="note" id="zoneInfo">points: 0</span>
+          </div>
+          <div class="note" style="margin-top:4px">영상 위를 클릭해 점을 찍으세요. 최소 3점부터 폴리곤이 적용됩니다. 이 영역 안에서 현금 거래를 감지합니다.</div>
+
+          <!-- Live Tier 1 Results -->
+          <div style="margin-top:10px;border:1px solid var(--line);border-radius:10px;overflow:hidden">
+            <div style="padding:8px 10px;background:#f5f9ff;border-bottom:1px solid var(--line);font-size:12px;font-weight:800;color:#2f4767">
+              Tier 1 Live Detection
+            </div>
+
+            <!-- YOLO-Pose Cash -->
+            <div style="padding:10px;border-bottom:1px solid var(--line)">
+              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <span style="font-size:12px;font-weight:800;color:#2f4767">CASH (YOLO-Pose)</span>
+                <span id="t1CashBadge" class="badge badge-ok" style="font-size:11px">CLEAR</span>
+              </div>
+              <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:4px;font-size:11px;color:var(--sub)">
+                <div>Persons: <b id="t1Persons">0</b></div>
+                <div>Staff(in): <b id="t1Staff">0</b></div>
+                <div>Customer(out): <b id="t1Cust">0</b></div>
+              </div>
+              <div id="t1DistBox" style="margin-top:6px;display:none">
+                <div style="font-size:11px;font-weight:700;color:#2f4767;margin-bottom:3px">Wrist Distances (staff↔customer)</div>
+                <div id="t1Distances" style="font-size:11px;color:var(--text);line-height:1.6"></div>
+              </div>
+              <div id="t1NoZone" style="margin-top:4px;font-size:11px;color:var(--warn);display:none">Zone not set — draw cashier zone first</div>
+            </div>
+
+            <!-- CLIP Fire/Violence -->
+            <div style="padding:10px;border-bottom:1px solid var(--line)">
+              <div style="font-size:12px;font-weight:800;color:#2f4767;margin-bottom:8px">CLIP ViT-L/14</div>
+              <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
+                <!-- Fire -->
+                <div>
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-size:11px;font-weight:700;color:var(--sub)">Fire</span>
+                    <span id="t1FireBadge" class="badge badge-ok" style="font-size:10px">CLEAR</span>
+                  </div>
+                  <div style="margin-top:4px;background:#f0f0f0;border-radius:4px;height:8px;overflow:hidden">
+                    <div id="t1FireBar" style="height:100%;width:0%;background:#16a34a;border-radius:4px;transition:width 0.3s"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;margin-top:2px">
+                    <span id="t1FireScore" style="font-size:11px;font-weight:800;color:var(--text)">0.0%</span>
+                    <span style="font-size:10px;color:var(--sub)">th: 25%</span>
+                  </div>
+                  <div id="t1FirePrompts" style="margin-top:3px;font-size:10px;color:var(--sub);line-height:1.4">
+                    + "fire burning" / "smoke rising"<br>− "normal room" / "steam" / "fog"
+                  </div>
+                </div>
+                <!-- Violence -->
+                <div>
+                  <div style="display:flex;justify-content:space-between;align-items:center">
+                    <span style="font-size:11px;font-weight:700;color:var(--sub)">Violence</span>
+                    <span id="t1ViolBadge" class="badge badge-ok" style="font-size:10px">CLEAR</span>
+                  </div>
+                  <div style="margin-top:4px;background:#f0f0f0;border-radius:4px;height:8px;overflow:hidden">
+                    <div id="t1ViolBar" style="height:100%;width:0%;background:#16a34a;border-radius:4px;transition:width 0.3s"></div>
+                  </div>
+                  <div style="display:flex;justify-content:space-between;margin-top:2px">
+                    <span id="t1ViolScore" style="font-size:11px;font-weight:800;color:var(--text)">0.0%</span>
+                    <span style="font-size:10px;color:var(--sub)">th: 30%</span>
+                  </div>
+                  <div id="t1ViolPrompts" style="margin-top:3px;font-size:10px;color:var(--sub);line-height:1.4">
+                    + "fighting violently" / "assault"<br>− "normal" / "playing" / "hug"
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <!-- Accumulator -->
+            <div id="t1Accum" style="padding:8px 10px;font-size:11px;color:var(--sub);background:#fafcff">
+              Accumulator: cash 0/2 · fire 0/2 · violence 0/2
+            </div>
+          </div>
+
+          <div class="status-box" style="margin-top:10px">
+            <div class="status-row"><div class="status-k">Status</div><div id="stStatus" class="status-v">-</div></div>
+            <div class="status-row"><div class="status-k">Stream</div><div id="stStream" class="status-v">-</div></div>
+          </div>
+
+          <!-- Latest Inference -->
+          <div id="latestInference" style="margin-top:10px;border:1px solid var(--line);border-radius:10px;padding:8px 10px;background:#fafcff;font-size:11px;color:var(--sub)">
+            Latest: waiting...
+          </div>
+        </section>
+
+        <!-- Right: Config -->
+        <section>
+          <div class="fields">
+            <div class="field"><label>Camera ID</label><input id="sCamId" readonly /></div>
+            <div class="field">
+              <label>Cash Trigger Mode</label>
+              <select id="sTriggerMode" style="width:100%;padding:6px 8px;border:1px solid var(--line);border-radius:6px;font-size:12px" onchange="onTriggerModeChange()">
+                <option value="wrist">Wrist Proximity (기본)</option>
+                <option value="zone_intrusion">Zone Intrusion (캐셔 안보일때)</option>
+              </select>
+            </div>
+            <div class="field" id="wristPxField"><label>Wrist Threshold (px)</label><input id="sWristPx" value="80" /></div>
+            <div class="field full"><label>RTSP URL</label><input id="sRtsp" /></div>
+          </div>
+          <div id="triggerModeDesc" class="note" style="margin-top:4px;padding:6px 8px;background:#f0f7ff;border-radius:6px;font-size:11px;line-height:1.5"></div>
+
+          <div class="actions">
+            <button class="btn btn-primary" onclick="startCam()">Start</button>
+            <button class="btn btn-danger" onclick="stopCam()">Stop</button>
+            <button class="btn btn-danger" onclick="removeCam()">Remove</button>
+          </div>
+
+          <div style="margin-top:14px;padding:10px;border:1px solid var(--line);border-radius:10px;background:#f7fbff">
+            <strong class="note">3-Tier Cascade</strong>
+            <div class="note" style="margin-top:6px;line-height:1.6">
+              <b>Tier 1</b>: YOLO-Pose wrist proximity + CLIP zero-shot<br>
+              <b>Accumulator</b>: cash 2/30s · fire 2/15s · violence 2/10s<br>
+              <b>Tier 2</b>: Qwen2.5-VL-3B 12-frame clip analysis<br>
+              <b>Tier 3</b>: Cloud API for conf 0.3–0.7 range only<br>
+              <b>ROI</b>: Counter ROI crops frame for cash trigger
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const API = '/api/proxy';
+const MJPEG_BASE = `http://${location.hostname}:8000/api/cameras`;  // Direct to model server
+const POLL_MS = 5000;
+let cameras = {};
+let selectedCamId = '';
+let pollTimer = null;
+let tier1Timer = null;
+let gridRendered = false;
+
+// Polygon zone state — normalized [0-1] points
+let cashierZone = [];  // [[x,y], ...]
+
+async function requestJson(method, url, body) {
+  const opts = { method, headers: {} };
+  if (body !== undefined) {
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }
+  const res = await fetch(url, opts);
+  return res.json().catch(() => ({}));
+}
+
+function esc(s) { return String(s||'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ── Grid ──
+function renderGrid(force) {
+  const ids = Object.keys(cameras);
+  const grid = document.getElementById('camGrid');
+  document.getElementById('emptyState').style.display = ids.length ? 'none' : 'block';
+
+  // Only do full render on first load or camera list change
+  const currentIds = [...grid.querySelectorAll('.cam-card')].map(c => c.dataset.cam).sort().join(',');
+  const newIds = ids.sort().join(',');
+  if (gridRendered && !force && currentIds === newIds) {
+    // Just update status pills + refresh snapshots
+    ids.forEach(id => {
+      const card = grid.querySelector(`.cam-card[data-cam="${CSS.escape(id)}"]`);
+      if (!card) return;
+      const c = cameras[id];
+      const pill = card.querySelector('.pill');
+      if (pill) {
+        pill.textContent = c.running ? 'LIVE' : 'STOPPED';
+        pill.className = `pill ${c.running ? 'pill-ok' : 'pill-warn'}`;
+      }
+      // Only refresh snapshot for stopped cameras (MJPEG handles running ones)
+      if (!c.running) {
+        const img = card.querySelector('.cam-live');
+        if (img) img.src = `${API}/snapshot/${encodeURIComponent(id)}?t=${Date.now()}`;
+      }
+    });
+    updateGlobalStatus();
+    return;
+  }
+
+  // Full render
+  grid.innerHTML = ids.map(id => {
+    const c = cameras[id];
+    const running = c.running;
+    return `
+      <article class="cam-card" data-cam="${esc(id)}">
+        <div class="cam-thumb">
+          <img class="cam-live" src="${running ? MJPEG_BASE+'/'+encodeURIComponent(id)+'/mjpeg' : API+'/snapshot/'+encodeURIComponent(id)+'?t='+Date.now()}" alt="${esc(id)}" onerror="this.style.opacity='0.3'" />
+          <div class="cam-overlay">
+            <div class="cam-top">
+              <div class="cam-name">${esc(id)}</div>
+              <span class="pill ${running ? 'pill-ok' : 'pill-warn'}">${running ? 'LIVE' : 'STOPPED'}</span>
+            </div>
+          </div>
+        </div>
+        <div class="cam-foot">
+          <span class="cam-meta">Click to configure</span>
+          <button class="btn btn-sm" onclick="event.stopPropagation();openSettings('${esc(id)}')">Settings</button>
+        </div>
+      </article>`;
+  }).join('');
+  gridRendered = true;
+  updateGlobalStatus();
+}
+
+function updateGlobalStatus() {
+  const ids = Object.keys(cameras);
+  const running = ids.filter(id => cameras[id].running).length;
+  const el = document.getElementById('globalStatus');
+  el.textContent = `${running} RUNNING`;
+  el.className = `badge ${running ? 'badge-ok' : 'badge-warn'}`;
+  el.style.cssText = 'padding:6px 12px;border-radius:999px;font-weight:800';
+}
+
+async function loadCameras(force) {
+  const data = await requestJson('GET', `${API}/cameras`);
+  const list = data.cameras || [];
+  cameras = {};
+  list.forEach(c => { cameras[c.id] = c; });
+  renderGrid(force);
+}
+
+// ── Add ──
+function openAddModal() { document.getElementById('addModal').classList.add('open'); }
+function closeAddModal() { document.getElementById('addModal').classList.remove('open'); }
+
+async function addCamera(startAfter) {
+  const id = document.getElementById('aCamId').value.trim();
+  const rtsp = document.getElementById('aRtsp').value.trim();
+  if (!id || !rtsp) return alert('Camera ID and RTSP URL required');
+  await requestJson('POST', `${API}/cameras/${encodeURIComponent(id)}/start?rtsp_url=${encodeURIComponent(rtsp)}`, {});
+  if (!startAfter) await requestJson('POST', `${API}/cameras/${encodeURIComponent(id)}/stop`);
+  closeAddModal();
+  await loadCameras(true);
+}
+
+// ── Settings Modal ──
+function openSettings(camId) {
+  const cam = cameras[camId];
+  if (!cam) return;
+  selectedCamId = camId;
+
+  document.getElementById('setTitle').textContent = `Camera Settings — ${camId}`;
+  document.getElementById('sCamId').value = camId;
+  document.getElementById('sRtsp').value = cam.rtsp_url || '';
+  document.getElementById('sWristPx').value = cam.wrist_px || 80;
+  document.getElementById('sTriggerMode').value = cam.trigger_mode || 'wrist';
+  onTriggerModeChange();
+
+  // Load cashier zone (normalized 0-1 points)
+  cashierZone = Array.isArray(cam.cashier_zone) ? cam.cashier_zone.slice() : [];
+
+  document.getElementById('stStatus').textContent = cam.running ? 'Running' : 'Stopped';
+  document.getElementById('stStream').textContent = cam.has_frame ? 'Frame available' : 'Waiting...';
+
+  // MJPEG direct from model server (no proxy, no polling)
+  const img = document.getElementById('setLive');
+  if (cam.running) {
+    img.src = `${MJPEG_BASE}/${encodeURIComponent(camId)}/mjpeg`;
+  } else {
+    img.src = `${API}/snapshot/${encodeURIComponent(camId)}?t=${Date.now()}`;
+  }
+
+  document.getElementById('setModal').classList.add('open');
+  roiCanvasInitialized = false;
+  setTimeout(initRoiCanvas, 200);
+  updateZoneInfo();
+
+  // Start Tier 1 live polling
+  pollTier1();
+  if (tier1Timer) clearInterval(tier1Timer);
+  tier1Timer = setInterval(pollTier1, 1200);
+}
+
+function closeSettings() {
+  document.getElementById('setLive').src = '';  // Kills MJPEG connection
+  document.getElementById('setModal').classList.remove('open');
+  selectedCamId = '';
+  if (tier1Timer) { clearInterval(tier1Timer); tier1Timer = null; }
+}
+
+async function pollTier1() {
+  if (!selectedCamId) return;
+  const data = await requestJson('GET', `${API}/cameras/${encodeURIComponent(selectedCamId)}/tier1`);
+  if (data.status === 'no_data') return;
+
+  // ── Cash (YOLO-Pose) ──
+  const cash = data.cash || {};
+  const cashBadge = document.getElementById('t1CashBadge');
+  document.getElementById('t1Persons').textContent = cash.persons_detected || 0;
+  document.getElementById('t1Staff').textContent = cash.staff_count || 0;
+  document.getElementById('t1Cust').textContent = cash.customer_count || 0;
+
+  // Zone warning
+  document.getElementById('t1NoZone').style.display = cash.zone_set === false ? 'block' : 'none';
+
+  if (cash.triggered) {
+    cashBadge.textContent = 'TRIGGERED';
+    cashBadge.className = 'badge badge-bad';
+  } else {
+    cashBadge.textContent = 'CLEAR';
+    cashBadge.className = 'badge badge-ok';
+  }
+
+  // Detection details
+  const distBox = document.getElementById('t1DistBox');
+  const distDiv = document.getElementById('t1Distances');
+  const triggerMode = cash.trigger_mode || 'wrist';
+
+  if (triggerMode === 'zone_intrusion') {
+    // Zone intrusion mode
+    const intrusions = cash.intrusions || [];
+    distBox.style.display = 'block';
+    document.getElementById('t1Staff').textContent = cash.inside_persons || 0;
+    document.getElementById('t1Cust').textContent = cash.outside_persons || 0;
+    if (intrusions.length > 0) {
+      distDiv.innerHTML = `<div style="font-weight:700;color:#dc2626;margin-bottom:4px">Zone Intrusions (${intrusions.length})</div>` +
+        intrusions.map(d => `<div style="font-size:11px">person[${d.person_idx}] ${d.keypoint} → zone (${d.x}, ${d.y})</div>`).join('');
+    } else {
+      distDiv.innerHTML = `<span style="color:var(--sub)">No zone intrusions — outside: ${cash.outside_persons||0}, inside: ${cash.inside_persons||0}</span>`;
+    }
+  } else {
+    // Wrist proximity mode (original)
+    const dists = cash.distances || [];
+    if (dists.length > 0) {
+      distBox.style.display = 'block';
+      distDiv.innerHTML = dists.map(d => {
+        const pct = Math.min(100, (d.wrist_px / (cash.wrist_threshold || 80)) * 100);
+        const color = d.wrist_px < (cash.wrist_threshold || 80) ? '#dc2626' : (pct > 70 ? '#d97706' : '#16a34a');
+        return `<div style="display:flex;align-items:center;gap:6px;margin-bottom:2px">
+          <span>[${d.a_idx}]↔[${d.b_idx}]</span>
+          <div style="flex:1;background:#f0f0f0;border-radius:3px;height:6px;overflow:hidden">
+            <div style="height:100%;width:${Math.min(100,100-pct+100)}%;background:${color};border-radius:3px"></div>
+          </div>
+          <b style="color:${color};min-width:50px;text-align:right">${d.wrist_px.toFixed(0)}px</b>
+          <span style="color:var(--sub)">/ ${cash.wrist_threshold||80}</span>
+        </div>`;
+      }).join('');
+    } else {
+      distBox.style.display = dists.length === 0 && (cash.staff_count > 0 || cash.customer_count > 0) ? 'block' : 'none';
+      if (cash.staff_count > 0 && cash.customer_count === 0) {
+        distDiv.innerHTML = '<span style="color:var(--sub)">All persons inside zone (staff only) — no customer detected outside</span>';
+      } else if (cash.customer_count > 0 && cash.staff_count === 0) {
+        distDiv.innerHTML = '<span style="color:var(--sub)">All persons outside zone (customers only) — no staff detected inside</span>';
+      } else {
+        distDiv.innerHTML = '';
+        distBox.style.display = 'none';
+      }
+    }
+  }  // end triggerMode branch
+
+  // ── Fire (CLIP) ──
+  const fire = data.fire || {};
+  const fireScore = (fire.score || 0) * 100;
+  document.getElementById('t1FireScore').textContent = fireScore.toFixed(1) + '%';
+  const fireBar = document.getElementById('t1FireBar');
+  fireBar.style.width = Math.min(100, fireScore / 0.25).toFixed(0) + '%';
+  const fireBadge = document.getElementById('t1FireBadge');
+  if (fire.triggered) {
+    fireBadge.textContent = 'TRIGGERED'; fireBadge.className = 'badge badge-bad';
+    fireBar.style.background = '#dc2626';
+  } else if (fireScore > 20) {
+    fireBadge.textContent = 'WATCH'; fireBadge.className = 'badge badge-warn';
+    fireBar.style.background = '#d97706';
+  } else {
+    fireBadge.textContent = 'CLEAR'; fireBadge.className = 'badge badge-ok';
+    fireBar.style.background = '#16a34a';
+  }
+
+  // ── Violence (CLIP) ──
+  const viol = data.violence || {};
+  const violScore = (viol.score || 0) * 100;
+  document.getElementById('t1ViolScore').textContent = violScore.toFixed(1) + '%';
+  const violBar = document.getElementById('t1ViolBar');
+  violBar.style.width = Math.min(100, violScore / 0.30).toFixed(0) + '%';
+  const violBadge = document.getElementById('t1ViolBadge');
+  if (viol.triggered) {
+    violBadge.textContent = 'TRIGGERED'; violBadge.className = 'badge badge-bad';
+    violBar.style.background = '#dc2626';
+  } else if (violScore > 25) {
+    violBadge.textContent = 'WATCH'; violBadge.className = 'badge badge-warn';
+    violBar.style.background = '#d97706';
+  } else {
+    violBadge.textContent = 'CLEAR'; violBadge.className = 'badge badge-ok';
+    violBar.style.background = '#16a34a';
+  }
+
+  // ── Accumulator ──
+  const acc = data.accumulator || {};
+  document.getElementById('t1Accum').textContent =
+    `Accumulator: cash ${acc.cash||0}/2 · fire ${acc.fire||0}/2 · violence ${acc.violence||0}/2`;
+
+  // ── Latest inference line ──
+  const lt = new Date(data.timestamp).toLocaleTimeString('ko-KR');
+  const lc = data.cash || {};
+  const ld = lc.min_distance != null ? lc.min_distance.toFixed(0) + 'px' : '—';
+  const lf = ((data.fire||{}).score||0)*100;
+  const lv = ((data.violence||{}).score||0)*100;
+  document.getElementById('latestInference').innerHTML =
+    `<b>${lt}</b> · Cash: <span style="color:${lc.triggered?'#dc2626':'#16a34a'}">${lc.triggered?'TRIG':'clear'}</span> s:${lc.staff_count||0} c:${lc.customer_count||0} dist:${ld} · Fire:${lf.toFixed(1)}% · Viol:${lv.toFixed(1)}%`;
+}
+
+async function startCam() {
+  if (!selectedCamId) return;
+  const rtsp = document.getElementById('sRtsp').value.trim();
+  if (!rtsp) return alert('RTSP URL required');
+  await requestJson('POST', `${API}/cameras/${encodeURIComponent(selectedCamId)}/start?rtsp_url=${encodeURIComponent(rtsp)}`, {});
+  await loadCameras(true);
+  document.getElementById('stStatus').textContent = 'Running';
+}
+
+async function stopCam() {
+  if (!selectedCamId) return;
+  await requestJson('POST', `${API}/cameras/${encodeURIComponent(selectedCamId)}/stop`);
+  document.getElementById('setLive').src = '';
+  await loadCameras(true);
+  document.getElementById('stStatus').textContent = 'Stopped';
+}
+
+async function removeCam() {
+  if (!selectedCamId || !confirm(`Remove ${selectedCamId}?`)) return;
+  await requestJson('DELETE', `${API}/cameras/${encodeURIComponent(selectedCamId)}`);
+  closeSettings();
+  await loadCameras(true);
+}
+
+async function stopAll() {
+  for (const id of Object.keys(cameras)) await requestJson('POST', `${API}/cameras/${encodeURIComponent(id)}/stop`);
+  await loadCameras(true);
+}
+
+// ── Polygon Zone Canvas ──
+const canvas = () => document.getElementById('roiCanvas');
+const ctx = () => canvas().getContext('2d');
+const liveImg = () => document.getElementById('setLive');
+
+function initRoiCanvas() {
+  const c = canvas();
+  const wrap = document.getElementById('setLiveWrap');
+  const r = wrap.getBoundingClientRect();
+  c.width = Math.floor(r.width);
+  c.height = Math.floor(r.height);
+  drawZone();
+}
+
+function getRenderBox() {
+  const img = liveImg();
+  const c = canvas();
+  const iw = img.naturalWidth || 1280;
+  const ih = img.naturalHeight || 720;
+  const cw = c.width; const ch = c.height;
+  const scale = Math.min(cw/iw, ch/ih);
+  const rw = iw*scale; const rh = ih*scale;
+  const ox = (cw-rw)/2; const oy = (ch-rh)/2;
+  return { iw, ih, cw, ch, scale, rw, rh, ox, oy };
+}
+
+function canvasToNorm(cx, cy) {
+  const b = getRenderBox();
+  const nx = (cx - b.ox) / Math.max(b.rw, 1);
+  const ny = (cy - b.oy) / Math.max(b.rh, 1);
+  return [Math.max(0, Math.min(1, nx)), Math.max(0, Math.min(1, ny))];
+}
+
+function normToCanvas(nx, ny) {
+  const b = getRenderBox();
+  return [b.ox + nx * b.rw, b.oy + ny * b.rh];
+}
+
+function drawZone() {
+  const c = canvas(); const g = ctx();
+  g.clearRect(0, 0, c.width, c.height);
+  if (!cashierZone.length) return;
+
+  const mapped = cashierZone.map(p => normToCanvas(p[0], p[1]));
+
+  g.save();
+  g.strokeStyle = 'rgba(234,179,8,0.95)';
+  g.lineWidth = 2;
+
+  // Draw polygon outline (NO fill)
+  if (mapped.length >= 2) {
+    g.beginPath();
+    g.moveTo(mapped[0][0], mapped[0][1]);
+    for (let i = 1; i < mapped.length; i++) g.lineTo(mapped[i][0], mapped[i][1]);
+    if (mapped.length >= 3) g.closePath();
+    g.stroke();
+  }
+
+  // Draw points
+  for (const [x, y] of mapped) {
+    g.beginPath();
+    g.arc(x, y, 5, 0, Math.PI * 2);
+    g.fillStyle = 'rgba(234,179,8,0.95)';
+    g.fill();
+    g.strokeStyle = '#fff';
+    g.lineWidth = 1.5;
+    g.stroke();
+    g.lineWidth = 2;
+    g.strokeStyle = 'rgba(234,179,8,0.95)';
+  }
+
+  // Label
+  if (mapped.length >= 1) {
+    g.fillStyle = 'rgba(8,18,34,.74)';
+    g.fillRect(8, 8, 130, 20);
+    g.fillStyle = '#fff';
+    g.font = 'bold 11px sans-serif';
+    g.fillText(`CASHIER ZONE (${cashierZone.length}pts)`, 12, 22);
+  }
+
+  g.restore();
+}
+
+function updateZoneInfo() {
+  document.getElementById('zoneInfo').textContent = `points: ${cashierZone.length}`;
+}
+
+function undoPoint() {
+  cashierZone.pop();
+  drawZone();
+  updateZoneInfo();
+}
+
+function clearZone() {
+  cashierZone = [];
+  drawZone();
+  updateZoneInfo();
+}
+
+async function saveZones() {
+  if (!selectedCamId) return;
+  const wpx = parseInt(document.getElementById('sWristPx').value) || 80;
+  const triggerMode = document.getElementById('sTriggerMode').value;
+  await requestJson('PUT', `${API}/cameras/${encodeURIComponent(selectedCamId)}/zones`, {
+    cashier_zone: cashierZone,
+    customer_zone: [],
+    wrist_px: wpx,
+    trigger_mode: triggerMode,
+  });
+  if (cameras[selectedCamId]) {
+    cameras[selectedCamId].cashier_zone = cashierZone.slice();
+    cameras[selectedCamId].wrist_px = wpx;
+    cameras[selectedCamId].trigger_mode = triggerMode;
+  }
+  updateZoneInfo();
+}
+
+function onTriggerModeChange() {
+  const mode = document.getElementById('sTriggerMode').value;
+  const desc = document.getElementById('triggerModeDesc');
+  const wristField = document.getElementById('wristPxField');
+  if (mode === 'zone_intrusion') {
+    desc.innerHTML = '<b>Zone Intrusion</b>: 캐셔존 밖에 있는 사람의 손목/팔꿈치가 캐셔존 안으로 들어오면 트리거.<br>캐셔가 카운터 뒤에 가려져 안 보이는 카메라에 적합 (예: 일산).';
+    wristField.style.display = 'none';
+  } else {
+    desc.innerHTML = '<b>Wrist Proximity</b>: 두 사람의 손목 거리가 임계값 이하면 트리거.<br>캐셔와 고객이 모두 보이는 카메라에 적합 (예: 금촌).';
+    wristField.style.display = '';
+  }
+}
+
+// Canvas click → add point
+document.addEventListener('DOMContentLoaded', () => {
+  const c = document.getElementById('roiCanvas');
+  c.style.cursor = 'crosshair';
+
+  c.addEventListener('pointerdown', e => {
+    e.preventDefault();
+    const rect = c.getBoundingClientRect();
+    const cx = e.clientX - rect.left;
+    const cy = e.clientY - rect.top;
+    const [nx, ny] = canvasToNorm(cx, cy);
+    cashierZone.push([nx, ny]);
+    drawZone();
+    updateZoneInfo();
+  });
+
+  c.addEventListener('contextmenu', e => e.preventDefault());
+});
+
+// Resize
+window.addEventListener('resize', () => { if(document.getElementById('setModal').classList.contains('open')) initRoiCanvas(); });
+// Capture natural dimensions once from first MJPEG frame, then stop listening
+let roiCanvasInitialized = false;
+document.getElementById('setLive').addEventListener('load', () => {
+  if (!roiCanvasInitialized && document.getElementById('setModal').classList.contains('open')) {
+    roiCanvasInitialized = true;
+    setTimeout(initRoiCanvas, 50);
+  }
+});
+
+// ── Card clicks ──
+document.getElementById('camGrid').addEventListener('click', e => {
+  const card = e.target.closest('.cam-card');
+  if (!card || e.target.closest('button')) return;
+  openSettings(card.dataset.cam);
+});
+document.getElementById('addModal').addEventListener('click', e => { if(e.target.id==='addModal') closeAddModal(); });
+document.getElementById('setModal').addEventListener('click', e => { if(e.target.id==='setModal') closeSettings(); });
+
+// ── Boot ──
+async function boot() {
+  await loadCameras(true);
+  pollTimer = setInterval(() => loadCameras(false), POLL_MS);
+}
+boot();
+</script>
+{% endblock %}

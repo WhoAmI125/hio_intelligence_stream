@@ -1,0 +1,98 @@
+{% extends "hio_v2/base_public.html" %}
+{% block title %}Tier 2 Logs — HiO v2{% endblock %}
+{% block page_title %}Tier 2: Qwen2.5-VL Analysis{% endblock %}
+{% block page_subtitle %}12초 영상 클립 분석 결과 + Tier 3 최종 판정{% endblock %}
+
+{% block top_actions %}
+<button class="btn" onclick="loadEvents()">Refresh</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:10px; margin-bottom:14px; }
+  .stat { border:1px solid var(--line); border-radius:12px; padding:12px; }
+  .stat .k { font-size:11px; color:var(--sub); font-weight:700; margin-bottom:4px; }
+  .stat .v { font-size:26px; font-weight:800; }
+  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; max-height:calc(100vh - 300px); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { position:sticky; top:0; background:#f4f8ff; color:#355070; font-size:11px; text-transform:uppercase; }
+  .badge { display:inline-flex; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; }
+  .badge-ok { color:#145c39; background:#ddf9eb; }
+  .badge-bad { color:#952045; background:#ffe8ef; }
+  .badge-warn { color:#7f5600; background:#fff3de; }
+  .badge-info { color:#1d67d7; background:#ecf5ff; }
+  .reason-full { line-height:1.5; max-width:500px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="stats" id="t2Stats"></div>
+
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Camera</th>
+        <th>Scenario</th>
+        <th>Detected</th>
+        <th>Confidence</th>
+        <th>Tier 2 Reason</th>
+        <th>Routing</th>
+        <th>Tier 3 Verdict</th>
+        <th>Tier 3 Reason</th>
+      </tr>
+    </thead>
+    <tbody id="t2Body">
+      <tr><td colspan="9" style="text-align:center;color:var(--sub);padding:40px">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+async function loadEvents() {
+  const data = await (await fetch('/api/proxy/events?limit=100')).json();
+  const events = data.events || [];
+  const stats = await (await fetch('/api/proxy/stats')).json();
+
+  const colors = { cash: ['var(--accent)','#ecf5ff'], fire: ['var(--warn)','#fff3de'], violence: ['var(--bad)','#ffe8ef'] };
+  document.getElementById('t2Stats').innerHTML = ['cash','fire','violence'].map(s => {
+    const [c, bg] = colors[s];
+    return `<div class="stat" style="border-color:${c}33"><div class="k">${s.charAt(0).toUpperCase()+s.slice(1)}</div><div class="v" style="color:${c}">${stats[s]||0}</div></div>`;
+  }).join('') + `<div class="stat"><div class="k">Total</div><div class="v">${data.total||0}</div></div>`;
+
+  const tbody = document.getElementById('t2Body');
+  if (!events.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--sub);padding:40px">No events yet</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = events.map(e => {
+    const time = new Date(e.timestamp).toLocaleString('ko-KR');
+    const conf = ((e.tier2_confidence||0)*100).toFixed(0);
+    const routing = e.tier2_confidence >= 0.7 ? 'Direct Alert' : e.tier2_confidence >= 0.3 ? 'Tier 3' : 'Dismissed';
+    const routeBadge = routing === 'Direct Alert' ? 'badge-ok' : routing === 'Tier 3' ? 'badge-warn' : 'badge-bad';
+    const t3 = e.tier3_verdict || '';
+    const t3Badge = t3 === 'CONFIRMED' ? 'badge-ok' : t3 === 'FALSE_ALARM' ? 'badge-bad' : t3 === 'DISMISSED' ? 'badge-warn' : 'badge-info';
+    const t3Text = t3 === 'FALSE_ALARM' ? 'Decline' : t3 === 'CONFIRMED' ? 'Confirmed' : t3 === 'DISMISSED' ? 'Dismissed' : (t3 || '—');
+
+    return `<tr>
+      <td style="white-space:nowrap">${time}</td>
+      <td>${e.cam_id}</td>
+      <td><span class="badge badge-info">${e.scenario}</span></td>
+      <td><span class="badge ${e.tier2_detected?'badge-bad':'badge-ok'}">${e.tier2_detected?'YES':'NO'}</span></td>
+      <td><b>${conf}%</b></td>
+      <td class="reason-full">${e.tier2_reason||'—'}</td>
+      <td><span class="badge ${routeBadge}">${routing}</span></td>
+      <td><span class="badge ${t3Badge}">${t3Text}</span></td>
+      <td class="reason-full">${e.tier3_reason||'—'}</td>
+    </tr>`;
+  }).join('');
+}
+loadEvents();
+setInterval(loadEvents, 10000);
+</script>
+{% endblock %}

@@ -1,0 +1,227 @@
+{% extends "hio_v2/base_public.html" %}
+{% block title %}Events — HiO v2{% endblock %}
+{% block page_title %}Confirmed Events{% endblock %}
+{% block page_subtitle %}Tier 1 → Tier 2 → Tier 3 파이프라인을 통과한 확정 이벤트{% endblock %}
+
+{% block top_actions %}
+<button class="btn" onclick="loadEvents()">Refresh</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:14px; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:140px; }
+  .field label { font-size:12px; color:var(--sub); font-weight:700; }
+  .field input,.field select { border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:13px; outline:none; }
+  .stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:10px; margin-bottom:14px; }
+  .stat { border:1px solid var(--line); border-radius:12px; padding:12px; background:#fff; }
+  .stat .k { font-size:11px; color:var(--sub); font-weight:700; margin-bottom:4px; }
+  .stat .v { font-size:26px; font-weight:800; }
+  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; max-height:calc(100vh - 360px); }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th,td { padding:8px 10px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
+  th { position:sticky; top:0; z-index:1; background:#f4f8ff; color:#355070; font-size:11px; text-transform:uppercase; }
+  .badge { display:inline-flex; padding:2px 8px; border-radius:999px; font-size:11px; font-weight:800; border:1px solid transparent; }
+  .badge-ok { color:#145c39; border-color:#8cddb4; background:#ddf9eb; }
+  .badge-bad { color:#952045; border-color:#f6acbf; background:#ffe8ef; }
+  .badge-warn { color:#7f5600; border-color:#f4cc80; background:#fff3de; }
+  .badge-info { color:#1d67d7; border-color:#a8cbf0; background:#ecf5ff; }
+  .reason-cell { max-width:400px; line-height:1.4; }
+  .media-links { display:flex; gap:6px; flex-wrap:wrap; }
+  .media-link { border:1px solid var(--line); border-radius:6px; padding:3px 8px; font-size:11px; font-weight:700; color:var(--accent); text-decoration:none; }
+  .media-link:hover { background:#f0f7ff; }
+  .pager { display:flex; align-items:center; gap:8px; margin-top:10px; }
+  .pg-btn { border:1px solid var(--line); border-radius:8px; padding:5px 10px; font-size:12px; font-weight:700; cursor:pointer; background:#fff; }
+  .pg-btn:disabled { opacity:.4; cursor:not-allowed; }
+  .pg-info { font-size:12px; color:var(--sub); }
+
+  .detail-modal { display:none; position:fixed; inset:0; z-index:3000; background:rgba(10,17,31,0.5); align-items:center; justify-content:center; padding:10px; }
+  .detail-modal.open { display:flex; }
+  .detail-card { width:min(700px,96vw); max-height:85vh; overflow:auto; border-radius:14px; background:#fff; border:1px solid var(--line); box-shadow:0 20px 52px rgba(9,17,31,0.3); }
+  .detail-head { padding:12px 14px; border-bottom:1px solid var(--line); display:flex; justify-content:space-between; align-items:center; font-weight:800; background:#f4f8ff; }
+  .detail-body { padding:14px; font-size:13px; line-height:1.6; }
+  .detail-row { display:grid; grid-template-columns:120px 1fr; border-bottom:1px solid #f0f0f0; padding:6px 0; }
+  .detail-k { font-weight:700; color:var(--sub); font-size:12px; }
+  .detail-v { color:var(--text); }
+</style>
+{% endblock %}
+
+{% block content %}
+<!-- Filters -->
+<div class="filters">
+  <div class="field">
+    <label>Camera</label>
+    <select id="fCamera" onchange="loadEvents()"><option value="">All</option></select>
+  </div>
+  <div class="field">
+    <label>Scenario</label>
+    <select id="fScenario" onchange="loadEvents()">
+      <option value="">All</option><option value="cash">Cash</option><option value="fire">Fire</option><option value="violence">Violence</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>Per page</label>
+    <select id="fLimit" onchange="page=0;loadEvents()">
+      <option value="20">20</option><option value="50" selected>50</option><option value="100">100</option>
+    </select>
+  </div>
+</div>
+
+<!-- Stats -->
+<div class="stats" id="statsGrid"></div>
+
+<!-- Table -->
+<div class="table-wrap">
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Camera</th>
+        <th>Scenario</th>
+        <th>Tier 2</th>
+        <th>Conf</th>
+        <th>Tier 3</th>
+        <th>Reason</th>
+        <th>Media</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody id="evBody">
+      <tr><td colspan="9" style="text-align:center;color:var(--sub);padding:40px">Loading...</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<!-- Pager -->
+<div class="pager">
+  <button class="pg-btn" id="pgPrev" onclick="changePage(-1)" disabled>Prev</button>
+  <span class="pg-info" id="pgInfo"></span>
+  <button class="pg-btn" id="pgNext" onclick="changePage(1)">Next</button>
+</div>
+
+<!-- Detail Modal -->
+<div class="detail-modal" id="detailModal" onclick="if(event.target===this)closeDetail()">
+  <div class="detail-card">
+    <div class="detail-head">
+      <span id="detailTitle">Event Detail</span>
+      <button class="btn" style="padding:4px 10px;font-size:12px" onclick="closeDetail()">Close</button>
+    </div>
+    <div class="detail-body" id="detailBody"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+let page = 0;
+let allEvents = [];
+
+async function loadEvents() {
+  const cam = document.getElementById('fCamera').value;
+  const scenario = document.getElementById('fScenario').value;
+  const limit = parseInt(document.getElementById('fLimit').value);
+  const params = new URLSearchParams({ limit, offset: page * limit });
+  if (cam) params.set('cam_id', cam);
+  if (scenario) params.set('scenario', scenario);
+
+  const data = await (await fetch(`/api/proxy/events?${params}`)).json();
+  allEvents = data.events || [];
+  const total = data.total || 0;
+
+  // Camera filter options
+  const camSet = new Set(allEvents.map(e => e.cam_id));
+  const camSel = document.getElementById('fCamera');
+  const curVal = camSel.value;
+  if (camSel.options.length <= 1) {
+    camSet.forEach(c => { const o = document.createElement('option'); o.value = c; o.textContent = c; camSel.appendChild(o); });
+    camSel.value = curVal;
+  }
+
+  // Stats
+  const stats = await (await fetch('/api/proxy/stats')).json();
+  document.getElementById('statsGrid').innerHTML = [
+    ['Total', total, ''],
+    ['Cash', stats.cash || 0, 'color:var(--accent)'],
+    ['Fire', stats.fire || 0, 'color:var(--warn)'],
+    ['Violence', stats.violence || 0, 'color:var(--bad)'],
+  ].map(([k, v, style]) =>
+    `<div class="stat"><div class="k">${k}</div><div class="v" style="${style}">${v}</div></div>`
+  ).join('');
+
+  // Table
+  const tbody = document.getElementById('evBody');
+  if (!allEvents.length) {
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--sub);padding:40px">No events found</td></tr>';
+  } else {
+    tbody.innerHTML = allEvents.map((e, i) => {
+      const time = new Date(e.timestamp).toLocaleString('ko-KR');
+      const conf = ((e.tier2_confidence || 0) * 100).toFixed(0);
+      const scenBadge = e.scenario === 'cash' ? 'badge-info' : e.scenario === 'fire' ? 'badge-bad' : 'badge-warn';
+      const t2Badge = e.tier2_detected ? 'badge-bad' : 'badge-ok';
+      const t3 = e.tier3_verdict || '';
+      const t3Badge = t3 === 'CONFIRMED' ? 'badge-ok' : t3 === 'FALSE_ALARM' ? 'badge-bad' : t3 === 'UNCERTAIN' ? 'badge-warn' : t3 === 'DISMISSED' ? 'badge-warn' : 'badge-warn';
+      const t3Text = t3 === 'FALSE_ALARM' ? 'Decline' : t3 === 'CONFIRMED' ? 'Confirmed' : t3 === 'UNCERTAIN' ? 'Uncertain' : t3 === 'DISMISSED' ? 'Dismissed' : (t3 || '—');
+      const reason = e.tier2_reason || '—';
+
+      // Media links
+      let media = '';
+      if (e.clip_path) media += `<a class="media-link" href="/media/${e.clip_path}" target="_blank">Full Clip</a>`;
+      if (e.clip_roi_path) media += `<a class="media-link" href="/media/${e.clip_roi_path}" target="_blank">ROI Clip</a>`;
+      if (e.thumbnail_path) media += `<a class="media-link" href="/media/${e.thumbnail_path}" target="_blank">Thumb</a>`;
+
+      return `<tr>
+        <td style="white-space:nowrap">${time}</td>
+        <td>${e.cam_id}</td>
+        <td><span class="badge ${scenBadge}">${e.scenario}</span></td>
+        <td><span class="badge ${t2Badge}">${e.tier2_detected ? 'Detected' : 'No'}</span></td>
+        <td><b>${conf}%</b></td>
+        <td><span class="badge ${t3Badge}">${t3Text}</span></td>
+        <td class="reason-cell">${reason}</td>
+        <td><div class="media-links">${media || '—'}</div></td>
+        <td><button class="btn" style="padding:3px 8px;font-size:11px" onclick="showDetail(${i})">Detail</button></td>
+      </tr>`;
+    }).join('');
+  }
+
+  // Pager
+  const totalPages = Math.ceil(total / limit) || 1;
+  document.getElementById('pgInfo').textContent = `Page ${page + 1} / ${totalPages} · ${total} events`;
+  document.getElementById('pgPrev').disabled = page === 0;
+  document.getElementById('pgNext').disabled = page >= totalPages - 1;
+}
+
+function changePage(d) { page = Math.max(0, page + d); loadEvents(); }
+
+function showDetail(idx) {
+  const e = allEvents[idx];
+  if (!e) return;
+  document.getElementById('detailTitle').textContent = `${e.cam_id} — ${e.scenario} — ${new Date(e.timestamp).toLocaleString('ko-KR')}`;
+
+  const rows = [
+    ['Camera', e.cam_id],
+    ['Scenario', e.scenario],
+    ['Time', new Date(e.timestamp).toLocaleString('ko-KR')],
+    ['Tier 2 Detected', e.tier2_detected ? 'YES' : 'NO'],
+    ['Tier 2 Confidence', ((e.tier2_confidence||0)*100).toFixed(1) + '%'],
+    ['Tier 2 Reason', e.tier2_reason || '—'],
+    ['Tier 3 Verdict', e.tier3_verdict === 'FALSE_ALARM' ? '<span class="badge badge-bad">Decline</span>' : e.tier3_verdict === 'CONFIRMED' ? '<span class="badge badge-ok">Confirmed</span>' : e.tier3_verdict === 'UNCERTAIN' ? '<span class="badge badge-warn" style="background:#fef3cd;color:#856404;border-color:#ffc107">Uncertain</span>' : e.tier3_verdict === 'DISMISSED' ? '<span class="badge badge-warn">Dismissed (Tier 2)</span>' : (e.tier3_verdict || '—')],
+    ['Tier 3 Reason', e.tier3_reason || '—'],
+    ['Clip (Full)', e.clip_path ? `<a href="/media/${e.clip_path}" target="_blank" class="media-link">${e.clip_path}</a>` : '—'],
+    ['Clip (ROI)', e.clip_roi_path ? `<a href="/media/${e.clip_roi_path}" target="_blank" class="media-link">${e.clip_roi_path}</a>` : '—'],
+    ['Thumbnail', e.thumbnail_path ? `<img src="/media/${e.thumbnail_path}" style="max-width:400px;border-radius:8px;border:1px solid var(--line)" />` : '—'],
+    ['Thumbnail (ROI)', e.thumbnail_roi_path ? `<img src="/media/${e.thumbnail_roi_path}" style="max-width:400px;border-radius:8px;border:1px solid var(--line)" />` : '—'],
+  ];
+
+  document.getElementById('detailBody').innerHTML = rows.map(([k, v]) =>
+    `<div class="detail-row"><div class="detail-k">${k}</div><div class="detail-v">${v}</div></div>`
+  ).join('');
+
+  document.getElementById('detailModal').classList.add('open');
+}
+
+function closeDetail() { document.getElementById('detailModal').classList.remove('open'); }
+
+loadEvents();
+setInterval(loadEvents, 10000);
+</script>
+{% endblock %}
