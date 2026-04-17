@@ -38,17 +38,25 @@ DEFAULT_UNIFIED_PROMPT = r"""
 You are an AI Retail Security & Safety Analyst.
 
 You will receive:
- 1. A CCTV image OR a short CCTV video clip (5??0 seconds)
+ 1. A CCTV image OR a short CCTV video clip (5-10 seconds)
  2. An upstream detection_type string: "{event_type}"
- 3. Optional detection metadata (YOLO/camera context)
 
-IMPORTANT CURRENCY CONTEXT:
- - The environment is assumed to primarily use Korean Money (KRW, South Korean Won).
- - When evaluating CASH_TRANSACTION, look for Korean banknotes/coins when possible.
- - Do NOT claim "Korean cash" unless concrete visible physical features support it.
+Visual hint overlay (when present):
+- A YELLOW closed polygon labeled "CASHIER ZONE" marks the cashier/counter area.
+- A CYAN polygon labeled "DRAWER" may mark a cash drawer region.
+- These overlays are attention hints, NOT physical objects in the scene.
+- Do NOT describe the polygon itself in reason_bullets. Never say "yellow box",
+  "rectangle", "frame overlay", or similar. It is a marker drawn by the system.
+- Focus cash-transaction judgment INSIDE the yellow polygon, but KEEP using
+  surrounding context (staff, customer, counter layout, body orientation) to
+  judge roles and service activity.
+- If the yellow polygon is absent, evaluate the full frame as before.
 
-Your job is to visually analyze ONLY what is visible in the clip and choose ONE policy:
+Currency context: This environment uses Korean Won (KRW). Korean banknotes have
+distinctive colors (blue 1000, green 5000, orange 10000, yellow 50000) and are
+larger than receipts. Do not claim "Korean cash" unless you see these traits.
 
+Your job: visually analyze ONLY what is visible and choose ONE policy:
  1. CASH_TRANSACTION
  2. THREAT_TO_CASHIER
  3. FIRE_ALERT
@@ -56,10 +64,10 @@ Your job is to visually analyze ONLY what is visible in the clip and choose ONE 
  5. NONE
 
 =====================================================================
-GLOBAL OUTPUT FORMAT (MANDATORY)
+OUTPUT FORMAT
 =====================================================================
 
-Return ONLY one JSON object with this exact structure:
+Return ONLY one JSON object:
 
 {
  "event_policy": "CASH_TRANSACTION | THREAT_TO_CASHIER | FIRE_ALERT | STAFF_CASH_THEFT_SUSPECT | NONE",
@@ -70,196 +78,151 @@ Return ONLY one JSON object with this exact structure:
  "confidence": 0.0-1.0,
  "policy_scores": {},
  "reason_bullets": [
-  "- [PROMPT_VERSION] v.26.01.23",
-  "- Factual visual observation only",
-  "- Each bullet must describe a concrete visual fact",
-  "- Do not speculate beyond what is visible"
+  "- [PROMPT_VERSION] v.26.04.17",
+  "- (concrete visual facts only, no speculation)"
  ]
 }
 
 Rules:
- - Output JSON ONLY (no extra text).
- - Fill ALL top-level fields.
- - reason_bullets must be a list of strings starting with "- ".
-
-Versioning rule:
- - reason_bullets MUST include the model prompt version as the FIRST bullet.
- - The first bullet MUST follow this exact format:
-   "- [PROMPT_VERSION] v.26.01.23"
- - All subsequent bullets must describe factual visual observations only.
+ - Output JSON only (no extra text).
+ - Fill all top-level fields.
+ - reason_bullets: list of strings starting with "- ".
+ - First bullet: "- [PROMPT_VERSION] v.26.04.17"
+ - If you need words like "appears", "likely", "suggests", "seems" — evidence is
+   insufficient. Choose NONE instead.
 
 =====================================================================
-POLICY 1) CASH_TRANSACTION (Hard-Gate + Soft-Score Hybrid)
+POLICY 1) CASH_TRANSACTION
 =====================================================================
 
-Goal:
-Validate REAL CASH payment ONLY when mandatory visual evidence (HARD RULES)
-is satisfied, plus sufficient supporting evidence (SOFT RULES).
+Goal: Validate real cash payment only when visual evidence is clear.
 When uncertain, choose NONE.
 
-Strict context:
-- CASH means physical paper currency (not receipts/coupons/tickets).
-- Thin paper alone is NOT cash (receipts are also thin paper).
-- Hand proximity alone is NOT exchange.
-- Staff moving toward POS alone is NOT proof.
-- Unknown objects must be handled conservatively.
-- If you need speculative words ("appears", "likely", "consistent with", "suggests", "seems"),
-  then evidence is insufficient ??choose NONE.
+Context:
+- CASH = physical paper currency (not receipts/coupons/tickets).
+- Thin white paper alone is not cash.
+- Hand proximity alone is not exchange.
+- Treat upstream types cash, cash_object, potential_cash as "cash-like".
 
-Upstream cash-like types (for decision mapping):
-- Treat these as "cash-like upstream": cash, cash_object, potential_cash
+A) HARD RULES (all three must pass)
 
-A) HARD RULES (ALL MUST PASS)
-
-H1. CASH_VISUAL_CONFIRM (mandatory)
-PASS only if at least ONE cash-specific visual trait is clearly visible:
-- Visible banknote-like printing/color/pattern (not a plain white slip)
-OR
-- Multiple bills are clearly separated (more than one distinct paper bill)
-OR
-- Multiple bills are clearly counted/peeled (customer or staff)
+H1. CASH_VISUAL_CONFIRM
+PASS if at least one is clearly visible:
+- Banknote-like printing, color, or pattern (not a plain white slip)
+- One or more distinct paper bills visible (single bill counts if banknote traits are clear)
+- Staff or customer counting/peeling bills
 
 FAIL if:
-- Object looks like a plain white slip (receipt/coupon/ticket) with no visible banknote printing/color/features
-- Object is rigid/reflective like a card/device
-- Object emits light or resembles a smartphone screen
-- Object remains ambiguous with no cash-specific traits
+- Object looks like a plain white slip with no banknote features
+- Object is rigid/reflective (card/device) or emits light (smartphone screen)
+- Object remains ambiguous
 
-H2. OWNERSHIP_TRANSFER + PAYMENT_DIRECTION (mandatory)
-PASS only if ALL are visible:
-- Object is clearly visible in CUSTOMER's hand before transfer
-- After hands separate, the object is clearly visible in STAFF's hand (not just during overlap)
-- No ?'teleport?? object does not vanish and reappear without continuity
+H2. OWNERSHIP_TRANSFER
+PASS if:
+- Object moves from one person’s hand to another’s (customer to staff or staff to customer)
+- Transfer direction is visible (before and after the handover)
+- In video: brief occlusion during hand overlap is acceptable if the object is visible
+  in the giver’s hand before and the receiver’s hand after
+
 FAIL if:
-- Staff?’Customer-only transfer (receipt/change return) is the only confirmed direction
-- Ownership is unclear due to occlusion
-- Object is never clearly visible in staff possession after separation
+- Only one person handles the object (no transfer)
+- Ownership is unclear due to heavy occlusion across all frames
 
-H3. ACTIVE_TRANSACTION_CONTEXT (mandatory)
-PASS only if transaction context is visible:
-- Customer and staff are engaged at the counter/register area
-- Staff behavior is consistent with active service (not idle/personal activity)
+H3. ACTIVE_TRANSACTION_CONTEXT
+PASS if:
+- Customer and staff are at a counter/register area
+- Staff is performing service actions: operating register, opening drawer, handling goods,
+  processing payment, or interacting with customer about a transaction
+
 FAIL if:
-- Staff appears idle or using personal items without transaction context
-- No register/counter service context is visible
+- No counter/register context visible
+- Staff is clearly doing personal activity (eating, using personal phone, chatting with
+  coworker away from counter)
 
-B) SOFT RULES (EVIDENCE AFTER HARD RULES PASS)
+B) SOFT RULES (only evaluated after all hard rules pass)
 
-Soft rules are supporting evidence only.
-Soft rules NEVER override hard-rule failure.
+STRONG (at least 1 required to validate):
+S_STRONG_1. Cash drawer is visibly open or object is inserted into cash slot/till
+S_STRONG_2. Staff counts, peels, or aligns paper bills (one or more)
+S_STRONG_3. Staff gives paper bills or coins back to customer as change
 
-Define STRONG vs WEAK soft rules:
+WEAK (supporting evidence):
+S_WEAK_1. Handover moment is clearly visible (not heavily occluded)
+S_WEAK_2. Customer turns away or leaves after the exchange
+S_WEAK_3. Both parties look at the object during exchange
 
-STRONG soft rules (at least 1 STRONG is REQUIRED to validate):
-S_STRONG_1. SAFE_DRAWER_OPEN_OR_INSERT
-- Cash drawer is visibly open OR object is inserted into a cash slot/till
+C) SCORE REPORTING
 
-S_STRONG_2. STAFF_COUNTS_OR_ALIGNS_MULTIPLE_BILLS
-- Staff clearly counts/peels/aligns MULTIPLE paper bills (more than one)
-
-S_STRONG_3. CHANGE_GIVEN_BACK
-- Staff visibly gives paper bills/coins back to the customer as change
-
-WEAK soft rules:
-S_WEAK_1. CLEAR_GIVE_TAKE_VISIBILITY
-- The handover moment is clearly visible (not heavily occluded)
-
-S_WEAK_2. CUSTOMER_DEPARTS_AFTER
-- Customer turns away/leaves immediately after the exchange
-
-S_WEAK_3. GAZE_ON_OBJECT
-- Both parties??gaze is visibly directed toward the object during exchange
-
-C) SCORE REPORTING (OUTPUT COMPATIBILITY)
-
-Keep the existing score keys:
 policy_scores = {
-  "money_likelihood": 0-40,
-  "hand_to_hand": 0-40,
-  "safe_drawer": 0-40,
-  "non_cash_penalty": -60..0,
+  "money_likelihood": 0 | 25 | 40,
+  "hand_to_hand": 0 | 35 | 40,
+  "safe_drawer": 0 | 40,
+  "non_cash_penalty": -30 | -15 | 0,
   "total_score": (sum)
 }
 
-Important:
-- These scores are for reporting/confidence only.
-- Do NOT decide validity using total_score thresholds.
-- STRONG evidence MUST map to at least one score reaching 40 (see below).
-  If you cannot justify a 40 score from visible STRONG evidence, you MUST output NONE.
+Score mapping:
+- money_likelihood: 0 if H1 fails. 25 if banknote traits visible (any count). 40 if S_STRONG_2 passes.
+- hand_to_hand: 0 if H2 fails. 35 if transfer visible with continuity. 40 if S_STRONG_3 passes.
+- safe_drawer: 0 if S_STRONG_1 does not pass. 40 if drawer open/insert visible.
+- non_cash_penalty:
+    -30 if the transferred object itself is clearly a smartphone, card, or tablet
+    -15 if the object is a plain white slip with no banknote features
+    0 otherwise
+  Note: a phone visible nearby (on counter, in pocket) while a separate cash-like object
+  is being exchanged does NOT trigger penalty. Penalty applies only when the transferred
+  object itself is non-cash.
 
-Score mapping (discrete and enforceable):
+D) DECISION RULE
 
-money_likelihood:
-- 0 if H1 fails
-- 25 if H1 passes with visible banknote-like printing/color but single bill only
-- 40 if S_STRONG_2 passes (multiple bills counted/peeled/aligned by staff)
+Choose CASH_TRANSACTION only when ALL of these are true:
+1. H1, H2, H3 all pass
+2. At least one STRONG soft rule passes (S_STRONG_1, S_STRONG_2, or S_STRONG_3)
+3. At least one score is 40 (safe_drawer=40 or money_likelihood=40 or hand_to_hand=40)
 
-hand_to_hand:
-- 0 if H2 fails
-- 35 if customer?’staff transfer is clearly visible with continuity after separation
-- 40 if S_STRONG_3 passes (change visibly given back)
+If any condition fails, choose NONE.
 
-safe_drawer:
-- 0 if S_STRONG_1 does NOT pass
-- 40 if S_STRONG_1 passes (drawer open/insert visible)
+E) OUTPUT MAPPING
 
-NON-CASH penalty (apply conservatively):
-- non_cash_penalty = -60 if a smartphone/card/tablet is clearly visible as the exchanged object
-- non_cash_penalty = -20 if a thin object is present but looks like a plain white slip with no banknote features
-- non_cash_penalty = 0 otherwise
+Validated: event_policy=CASH_TRANSACTION, is_valid_event=true, decision=TRUE_POSITIVE, severity_label=low
+Not validated: event_policy=NONE, is_valid_event=false, decision=FALSE_POSITIVE (if upstream is cash-like) or NOT_APPLICABLE
 
-total_score =
-  money_likelihood + hand_to_hand + safe_drawer + non_cash_penalty
+F) reason_bullets: each bullet describes a concrete visible fact.
+If validated, at least one bullet describes the STRONG evidence observed.
 
-D) FINAL DECISION (HARD-GATE + STRONG REQUIRED)
+G) EXAMPLES
 
-If ANY HARD RULE fails:
-- Choose NONE (do not validate cash)
+Example 1 — TRUE_POSITIVE:
+Scene: Customer hands colored paper bills to staff at counter. Staff opens cash drawer
+and places bills inside. Customer receives coins as change.
+Output: is_valid_event=true, money_likelihood=40, hand_to_hand=40, safe_drawer=40,
+non_cash_penalty=0, total_score=120
+reason_bullets: ["- [PROMPT_VERSION] v.26.04.17", "- Customer holds two colored paper
+objects with banknote-like appearance", "- Staff receives bills and opens cash drawer",
+"- Coins handed back to customer as change"]
 
-If ALL HARD RULES pass:
-- Validate CASH_TRANSACTION ONLY if:
-  (at least 1 STRONG soft rule passes)
-  AND
-  (total soft rules passed >= 2, counting STRONG+WEAK)
+Example 2 — FALSE_POSITIVE (phone + receipt):
+Scene: Customer places phone on counter showing reservation. Staff hands white paper
+slip (receipt). No banknote features visible.
+Output: is_valid_event=false, money_likelihood=0, hand_to_hand=0, safe_drawer=0,
+non_cash_penalty=0, total_score=0
+reason_bullets: ["- [PROMPT_VERSION] v.26.04.17", "- Object on counter is a smartphone
+(screen illuminated)", "- White paper handed by staff has no banknote features (receipt)"]
 
-ABSOLUTE ENFORCEMENT (NO EXCEPTIONS):
-- If S_STRONG_1, S_STRONG_2, and S_STRONG_3 all FAIL ??MUST output NONE.
-- If is_valid_event=true, then at least one of these MUST be true:
-  safe_drawer==40 OR money_likelihood==40 OR hand_to_hand==40
-  If none are 40 ??MUST output NONE.
-
-E) OUTPUT FIELD MAPPING (KEEP GLOBAL SCHEMA)
-
-If validated CASH_TRANSACTION:
-- event_policy = CASH_TRANSACTION
-- event_type_detected = cash
-- is_valid_event = true
-- decision = TRUE_POSITIVE
-- severity_label = low
-- confidence: higher only when STRONG evidence is clearly visible
-
-If NOT validated:
-- event_policy = NONE
-- event_type_detected = none
-- is_valid_event = false
-- severity_label = none
-- decision:
-  - FALSE_POSITIVE if upstream detection_type is cash-like (cash/cash_object/potential_cash)
-  - NOT_APPLICABLE otherwise
-- confidence: low
-
-F) reason_bullets formatting (must remain factual)
-- Each bullet must describe a concrete visible fact.
-- Do NOT use speculative language ("appears", "likely", "consistent with", "suggests", "seems").
-- If CASH_TRANSACTION is validated, at least one bullet MUST describe the STRONG evidence as a factual observation:
-  (e.g., "The cash drawer is visibly open." / "Multiple bills are visibly counted." / "Coins/bills are visibly handed back as change.")
+Example 3 — TRUE_POSITIVE (single bill):
+Scene: Customer hands one colored paper object to staff at front desk. Object has
+visible green tint consistent with 5000 KRW. Staff places it in open drawer.
+Output: is_valid_event=true, money_likelihood=25, hand_to_hand=35, safe_drawer=40,
+non_cash_penalty=0, total_score=100
+reason_bullets: ["- [PROMPT_VERSION] v.26.04.17", "- Single paper object with green
+banknote-like color", "- Customer-to-staff transfer visible", "- Cash drawer open,
+bill placed inside"]
 
 =====================================================================
 POLICY 2) THREAT_TO_CASHIER
 =====================================================================
 
-Goal:
-Threats or violence toward cashier or staff.
+Goal: Threats or violence toward cashier or staff.
 
 Valid cues:
  - aggressive reach across counter
@@ -267,7 +230,6 @@ Valid cues:
  - weapon visible
 
 policy_scores:
-
 {
  "mandatory_score": 0,
  "supporting_score": 0,
@@ -277,63 +239,46 @@ policy_scores:
  "threat_label": "CLEAR | TENSE | INTIMIDATION | PHYSICAL | WEAPON"
 }
 
-Severity mapping:
- CLEAR -> none
- TENSE -> low
- INTIMIDATION -> medium
- PHYSICAL -> high
- WEAPON -> critical
+Severity: CLEAR=none, TENSE=low, INTIMIDATION=medium, PHYSICAL=high, WEAPON=critical
 
 =====================================================================
 POLICY 3) FIRE_ALERT
 =====================================================================
 
-Goal:
-Detect actual fire situations.
+Goal: Detect actual fire situations.
 
-FIRE_ALERT HARD GATE:
- FIRE_ALERT may be selected ONLY if at least one of the following is clearly visible:
+FIRE_ALERT requires at least one clearly visible:
  - active flames
  - visible smoke emitted from an object or area
 
-The presence of fire-related objects alone (fire extinguisher, alarm, hose, warning sign) does NOT qualify.
+Fire-related objects alone (extinguisher, alarm, sign) do not qualify.
 
-If flames or smoke are NOT visible:
- event_policy MUST be NONE
- event_type_detected MUST be none
- is_valid_event MUST be false
- decision MUST be FALSE_POSITIVE
- severity_label MUST be none
- fire_confidence MUST be 0.0
- smoke_confidence MUST be 0.0
+If flames or smoke are not visible:
+ event_policy=NONE, is_valid_event=false, fire_confidence=0.0, smoke_confidence=0.0
 
 policy_scores:
-
 {
  "fire_confidence": 0.0-1.0,
  "smoke_confidence": 0.0-1.0
 }
 
-Severity guideline:
- none / low / medium / high / critical based on visible scale and risk.
+Severity: none / low / medium / high / critical based on visible scale.
 
 =====================================================================
 POLICY 4) STAFF_CASH_THEFT_SUSPECT
 =====================================================================
 
-Goal:
-Suspicious cash removal by staff without a valid customer transaction.
+Goal: Suspicious cash removal by staff without a valid customer transaction.
 
-If metadata has has_cash_box_roi=true and cash_box_bboxes exist:
- - cash box access may be used as a strong hint
+If metadata has has_cash_box_roi=true and cash_box_bboxes:
+ - cash box access is a strong hint
 
 Otherwise use behavior:
- - cash-like object appears in staff hand
+ - cash-like object in staff hand
  - moved toward personal area (pocket, bag, inside clothes)
  - nervous look-around or hiding
 
 policy_scores:
-
 {
  "suspicion_level": 0-3,
  "suspicion_label": "none | low | medium | high",
@@ -344,20 +289,13 @@ policy_scores:
  "paperwork_or_reconciliation": true/false
 }
 
-Severity guideline:
- none / low / medium / high (critical only if extremely obvious and severe)
+Severity: none / low / medium / high
 
 =====================================================================
-FINAL POLICY PRIORITY
+POLICY PRIORITY: 1.FIRE_ALERT 2.THREAT_TO_CASHIER 3.CASH_TRANSACTION 4.STAFF_CASH_THEFT_SUSPECT 5.NONE
 =====================================================================
 
- 1. FIRE_ALERT
- 2. THREAT_TO_CASHIER
- 3. CASH_TRANSACTION
- 4. STAFF_CASH_THEFT_SUSPECT
- 5. NONE
-
-Always justify decisions using reason_bullets with factual visual observations only.
+Justify all decisions with factual visual observations in reason_bullets.
 """
 # ============================================================================
 
@@ -374,7 +312,7 @@ class GeminiValidator:
     # Best for: high volume, cost-efficient image validation
     # Pricing: FREE (standard) | $0.10/1M input + $0.40/1M output (paid)
     # https://ai.google.dev/gemini-api/docs/pricing
-    MODEL_NAME = "gemini-2.5-flash-lite"
+    MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
     EVIDENCE_PROMPT_VERSION = "evidence-v1.1"
     
     # Legacy prompts (for backward compatibility)
@@ -601,38 +539,30 @@ Respond in JSON format ONLY:
         return v if isinstance(v, list) else []
 
     def _build_evidence_prompt(self, event_type: str, packet: Any = None) -> str:
-        """Build Gemini prompt with soft upstream context from Tier1 evidence."""
+        """Build Gemini prompt with minimal upstream context prepended before policy.
+
+        Design notes (2026-04-17):
+        - florence_signals (matched_keywords, object_hints) removed to prevent
+          anchoring bias — Gemini should judge from visible evidence only.
+        - Upstream context placed BEFORE the policy prompt so recency bias
+          favors the policy rules (which come last).
+        - Only tier1_confidence and episode metadata kept for traceability.
+        """
         base_prompt = self.get_prompt(event_type)
         if packet is None:
             return base_prompt
 
         meta = self._packet_meta(packet)
-        florence_signals = self._normalize_florence_signals(meta.get('florence_signals'))
         lines = [
-            "--- UPSTREAM CONTEXT (TIER1, SOFT HINTS) ---",
+            "--- UPSTREAM CONTEXT (metadata only, do not use for visual judgment) ---",
             f"upstream_event_type: {event_type}",
             f"episode_id: {meta.get('episode_id') or 'unknown'}",
-            f"episode_state: VALIDATING",
-            f"stability: {float(meta.get('stability_score') or 0.0):.3f}",
             f"tier1_confidence: {float(meta.get('tier1_confidence') or 0.0):.3f}",
-            f"router_action: {meta.get('router_action') or 'unknown'}",
-            f"router_reason: {str(meta.get('router_reason') or 'none')[:200]}",
-            f"router_q: {meta.get('router_q') or {}}",
-            f"focus_hints: {meta.get('focus_hints') or []}",
             f"span: {meta.get('video_window_sec') or []}",
-            (
-                "florence_signals: "
-                "{"
-                f"matched_keywords:{florence_signals.get('matched_keywords', [])}, "
-                f"object_hints:{florence_signals.get('object_hints', [])}, "
-                f"exclusion_match:{florence_signals.get('exclusion_match', [])}, "
-                f"global_keywords:{florence_signals.get('global_keywords', [])}"
-                "}"
-            ),
-            "Upstream context may be unreliable. Use only visible evidence for final decision.",
             "--- END UPSTREAM CONTEXT ---",
         ]
-        return f"{base_prompt}\n\n" + "\n".join(lines)
+        # Upstream BEFORE policy prompt: recency bias favors the policy rules
+        return "\n".join(lines) + "\n\n" + base_prompt
 
     @staticmethod
     def _extract_json_text(text: str) -> Dict[str, Any]:
@@ -777,6 +707,18 @@ Respond in JSON format ONLY:
             print(f"[GeminiValidator] API error: {e}")
             return {"error": str(e)}
     
+    @staticmethod
+    def _parse_score(value) -> float:
+        """Safely parse a score value from Gemini response (may be int, float, or str)."""
+        if isinstance(value, (int, float)):
+            return float(value)
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except (ValueError, TypeError):
+                return 0.0
+        return 0.0
+
     def _parse_new_response_format(self, result: dict, original_event_type: str) -> Tuple[bool, float, str, str]:
         """
         Parse the new Gemini response format (soft scoring with policies).
@@ -816,7 +758,7 @@ Respond in JSON format ONLY:
         else:
             # Infer from event_policy
             is_valid = event_policy not in ['NONE', '', None]
-        
+
         # Build reason string from bullets or use legacy
         if reason_bullets and isinstance(reason_bullets, list):
             reason = ' '.join([b.strip() for b in reason_bullets])
@@ -824,11 +766,50 @@ Respond in JSON format ONLY:
             reason = legacy_reason
         else:
             reason = f"Policy: {event_policy}, Decision: {decision}, Severity: {severity_label}"
-        
+
         # Add policy scores to reason if available
         if policy_scores and isinstance(policy_scores, dict):
             total_score = policy_scores.get('total_score', 'N/A')
             reason = f"[Score: {total_score}] {reason}"
+
+        # CODE-LEVEL HARD GATE: enforce score requirements that the prompt requests
+        # but Gemini may not always comply with (~70-85% prompt compliance).
+        # This catches cases where Gemini sets is_valid_event=true but scores don't support it.
+        # Runs AFTER reason is built so the override message prepends to the full reason.
+        if is_valid and policy_scores and isinstance(policy_scores, dict):
+            gate_failed = False
+            gate_reason = ""
+
+            if event_type_detected in ('cash', '') and event_policy in ('CASH_TRANSACTION', ''):
+                # CASH hard gate: at least one STRONG score must be 40
+                safe_drawer = self._parse_score(policy_scores.get('safe_drawer', 0))
+                money_likelihood = self._parse_score(policy_scores.get('money_likelihood', 0))
+                hand_to_hand = self._parse_score(policy_scores.get('hand_to_hand', 0))
+
+                if safe_drawer < 40 and money_likelihood < 40 and hand_to_hand < 40:
+                    gate_failed = True
+                    gate_reason = (
+                        f"[HARD_GATE_OVERRIDE] CASH requires at least one STRONG score=40, "
+                        f"got safe_drawer={safe_drawer}, money_likelihood={money_likelihood}, "
+                        f"hand_to_hand={hand_to_hand}"
+                    )
+
+            elif event_type_detected == 'fire' and event_policy == 'FIRE_ALERT':
+                # FIRE hard gate: must have fire or smoke confidence > 0
+                fire_conf = self._parse_score(policy_scores.get('fire_confidence', 0))
+                smoke_conf = self._parse_score(policy_scores.get('smoke_confidence', 0))
+
+                if fire_conf <= 0 and smoke_conf <= 0:
+                    gate_failed = True
+                    gate_reason = (
+                        f"[HARD_GATE_OVERRIDE] FIRE requires fire_confidence>0 or smoke_confidence>0, "
+                        f"got fire={fire_conf}, smoke={smoke_conf}"
+                    )
+
+            if gate_failed:
+                print(f"[GeminiValidator] {gate_reason}")
+                is_valid = False
+                reason = f"{gate_reason} | {reason}"
         
         # Map event_policy to event_type_detected if not set
         if not event_type_detected or event_type_detected == 'none':

@@ -19,7 +19,7 @@ jinja2
 django  # For migrating existing EpisodeReview models
 # psycopg2-binary  # Uncomment if using PostgreSQL
 
-# Evolution (Shadow Mode & Critic)
+# Evolution (Critic)
 lightgbm
 scikit-learn
 pandas

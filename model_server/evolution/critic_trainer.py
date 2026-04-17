@@ -1,12 +1,11 @@
 """
 Critic Trainer — LightGBM-based false-alarm predictor.
 
-Trains a binary classifier on shadow feedback data to predict whether
-a Tier-1 detection is a true positive or false positive.
+Trains a binary classifier on feedback data to predict whether a Tier-1
+detection is a true positive or false positive.
 
-Used by:
-- EvidenceRouter: to bias routing decisions (skip / escalate)
-- ShadowAgent._on_batch_ready: triggered when batch threshold is met
+Currently unused at runtime (batch trainer is not triggered since the
+shadow pipeline was removed). Slated for full removal in a later pass.
 """
 
 import os
@@ -59,7 +58,7 @@ class CriticTrainer:
         Train or incrementally update the critic model.
 
         Args:
-            batch: list of feedback records from ShadowAgent.
+            batch: list of feedback records.
                    Each record must have 'tier1_confidence', 'tier1_keywords',
                    and 'agreement' fields.
 

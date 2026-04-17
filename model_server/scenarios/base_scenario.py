@@ -253,9 +253,12 @@ class CaptionAnalyzer:
                 'cash', 'money', 'banknote', 'banknotes',
                 'currency', 'dollar', 'won', 'coins',
                 'paying', 'payment', 'transaction',
-                'cash register', 'paper money', 'bill', 'bills',
-                # 추가: 거스름돈/지폐 변형 표현
-                'notes', 'change', 'cash payment',
+                'cash register', 'paper money', 'cash payment',
+                # 'bill', 'bills', 'notes', 'change' 제거:
+                #   - bill/bills: "restaurant bill", "phone bill" 오탐
+                #   - notes: "taking notes", "sticky notes" 오탐
+                #   - change: "change clothes", "change position" 오탐
+                # → bill/bills는 moderate로 강등, notes/change는 삭제
             ],
             'moderate_positive': [
                 # 장소 신호 (카운터/프론트)
@@ -265,49 +268,63 @@ class CaptionAnalyzer:
                 # Florence-2 로그에서 빈출하는 장소 (bank: 17804회, bank teller: 8040회)
                 'bank', 'bank teller', 'teller',
                 'store', 'lobby', 'customer',
-                # 손에 물체를 들고 있는 동작 (h2h 핵심)
+                # H2H 핵심: 손에 물체를 들고 있는 동작
                 'handing', 'holding', 'passing', 'reaching',
                 'exchanging', 'giving', 'receiving',
                 # 추가: 물건 놓기/집기 동작
                 'placing', 'picking',
                 # 지갑/소지품
                 'wallet', 'purse', 'envelope',
+                # strong에서 강등: 다의어이므로 단독으로 strong 신호 부적절
+                'bill', 'bills',
+                # H2H 강화: 두 사람 정면 대치 (접객 장면 신호)
+                'two men', 'two people', 'two women', 'two persons',
+                'facing each other', 'across the counter', 'across the desk',
+                'leaning over', 'leaning forward',
             ],
             'context_phrases': [
-                # H2H 전달 동작 (Florence-2가 실제 생성하는 표현)
-                'holding a piece of paper', 'holding piece of paper',
+                # === H2H 최상위 신호: 사람-사람 물체 전달 ===
+                'from one person to another', 'between two people',
+                'staff to customer', 'customer to staff',
+                'handing to customer', 'handing to the customer',
+                'handing to staff', 'handing to the staff',
+                'giving to customer', 'giving to the customer',
+                'giving to staff', 'giving to the staff',
+                'receiving from customer', 'receiving from staff',
+                'hand to hand', 'hand-to-hand',
+                # === 높은 신호: 전달 동작 (물체 이동) ===
                 'handing a piece of paper', 'passing a piece of paper',
-                'holding a small', 'holding a black',
-                'holding a brown', 'holding a white',
-                'holding something', 'handing something',
-                'passing something', 'giving something',
-                # 추가: Florence-2 로그 기반 미탐지 패턴
-                # "holding an object" 3794건, "holding a paper" 620건 미탐지
-                'holding an object', 'holding objects',
-                'holding a paper', 'holding papers',
-                'holding a cover', 'holding a file',
-                'holding a bag',
+                'handing something', 'passing something', 'giving something',
                 'handing an object', 'passing an object', 'giving an object',
                 'handing a paper', 'passing a paper',
-                # 추가: 색상 변형 (지폐 색상)
-                'holding a blue', 'holding a green', 'holding a red',
-                # 추가: 카운터 동작
-                'placing something', 'picking something', 'picking up',
+                'handing over', 'hands over',
                 'reaching across', 'receiving something',
-                # 지갑/주머니 동작
+                # === 높은 신호: 직접적 현금 동작 ===
+                'giving money', 'receiving money', 'counting money',
+                'counting bills', 'holding money', 'holding cash',
+                'cash drawer', 'counting something', 'flipping through',
+                # === 높은 신호: 서랍/금전등록기 ===
+                'opening drawer', 'open drawer', 'opening the drawer',
+                'putting into drawer', 'taking from drawer',
+                # === 높은 신호: 지갑/주머니 동작 ===
                 'reaching into wallet', 'pulling out wallet',
                 'taking out wallet', 'opening wallet',
                 'reaching into pocket', 'pulling from pocket',
                 'taking something out', 'pulling something out',
-                # 직접적 현금 동작
-                'handing over', 'hands over', 'giving money',
-                'receiving money', 'counting money', 'cash drawer',
-                'counting bills', 'holding money', 'holding cash',
-                # 서랍/금전등록기
-                'opening drawer', 'open drawer', 'opening the drawer',
-                'putting into drawer', 'taking from drawer',
+                # === H2H 신호: 두 사람 상호작용 맥락 ===
+                'face to face', 'face-to-face',
+                'speaking with', 'talking with customer', 'talking to customer',
+                'helping a customer', 'serving a customer',
+                'waiting at the counter', 'standing at the counter',
+                # === 중간 신호: 물체를 들고 있음 (단독으로는 약함) ===
+                'holding a piece of paper', 'holding piece of paper',
+                'holding something',
                 'folded paper', 'small rectangular',
-                'counting something', 'flipping through',
+                # 제거된 항목 (과도한 FP 유발):
+                #   - 'holding a small/black/brown/white/blue/green/red': 모든 물체에 매칭
+                #   - 'holding an object/objects': 너무 광범위 (3794건 중 대부분 비현금)
+                #   - 'holding a paper/papers/cover/file/bag': 서류/가방/파일 오탐
+                #   - 'placing something', 'picking something', 'picking up': 일반 동작
             ],
             # Florence-2가 묘사한 물체 힌트 → Gemini에 전달 (점수에는 미반영)
             # 현금과 혼동 가능한 물체만 포함 (car key, pen 등 불필요한 것 제외 → 토큰 절약)
@@ -337,17 +354,16 @@ class CaptionAnalyzer:
                 'swipe', 'contactless', 'terminal',
             ],
             'neutralizing_phrases': {
+                # 'cash'가 'cash register' 안에 있을 때만 neutralize
+                # 'cash register' 자체는 강한 현금 신호이므로 neutralize하지 않음
                 'cash': [
-                    'cash register',
-                ],
-                'cash register': [
                     'cash register',
                 ],
                 'bill': [
                     'billboard',
                 ],
             },
-            'weights': {'strong': 0.3, 'moderate': 0.1, 'context': 0.3, 'negative': -0.3}
+            'weights': {'strong': 0.3, 'moderate': 0.1, 'context': 0.15, 'negative': -0.3}
         },
         ScenarioType.VIOLENCE: {
             'strong_positive': [

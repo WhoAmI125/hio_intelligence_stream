@@ -6,7 +6,6 @@ Serves the monitoring UI and proxies API calls to model_server / db_server.
 Endpoints:
     GET /                    → redirect to /monitor/adhoc
     GET /monitor/adhoc       → real-time CCTV monitoring UI
-    GET /monitor/shadow      → shadow agent review UI
     GET /api/proxy/cameras   → proxy to db_server for camera configs
     GET /api/proxy/events    → proxy to db_server for event list
     GET /api/proxy/stats     → proxy to db_server for stats
@@ -136,24 +135,9 @@ async def adhoc_monitor(request: Request):
     """Real-time CCTV monitoring UI — rendered via Jinja2."""
     try:
         return templates.TemplateResponse(
+            request,
             "vlm_pipeline/adhoc_rtsp.html",
-            {"request": request, "active_page": "cctv"},
-        )
-    except Exception as e:
-        logger.error(f"Template render error: {e}")
-        return HTMLResponse(
-            content=f"<h1>Template error</h1><pre>{e}</pre>",
-            status_code=500,
-        )
-
-
-@app.get("/monitor/shadow", response_class=HTMLResponse)
-async def shadow_monitor(request: Request):
-    """Shadow agent review UI — rendered via Jinja2."""
-    try:
-        return templates.TemplateResponse(
-            "vlm_pipeline/monitor_shadow.html",
-            {"request": request, "active_page": "shadow"},
+            {"active_page": "cctv"},
         )
     except Exception as e:
         logger.error(f"Template render error: {e}")
@@ -168,8 +152,26 @@ async def gemini_logs_monitor(request: Request):
     """Gemini validation log UI rendered via Jinja2."""
     try:
         return templates.TemplateResponse(
+            request,
             "vlm_pipeline/gemini_logs.html",
-            {"request": request, "active_page": "gemini"},
+            {"active_page": "gemini"},
+        )
+    except Exception as e:
+        logger.error(f"Template render error: {e}")
+        return HTMLResponse(
+            content=f"<h1>Template error</h1><pre>{e}</pre>",
+            status_code=500,
+        )
+
+
+@app.get("/monitor/labeling", response_class=HTMLResponse)
+async def labeling_monitor(request: Request):
+    """One-by-one GT labeling UI for cash events."""
+    try:
+        return templates.TemplateResponse(
+            request,
+            "vlm_pipeline/labeling.html",
+            {"active_page": "labeling"},
         )
     except Exception as e:
         logger.error(f"Template render error: {e}")
@@ -184,8 +186,9 @@ async def florence_logs_monitor(request: Request):
     """Florence inference result log UI rendered via Jinja2."""
     try:
         return templates.TemplateResponse(
+            request,
             "vlm_pipeline/florence_logs.html",
-            {"request": request, "active_page": "florence"},
+            {"active_page": "florence"},
         )
     except Exception as e:
         logger.error(f"Template render error: {e}")
@@ -260,7 +263,6 @@ async def dashboard():
                     <div class="stat"><span class="label">Florence</span><span class="value">${d.florence_loaded ? 'Loaded' : 'Not loaded'}</span></div>
                     <div class="stat"><span class="label">Agents</span><span class="value">${agents}</span></div>
                     <div class="stat"><span class="label">Active Streams</span><span class="value">${streams.length}</span></div>
-                    <div class="stat"><span class="label">Shadow Agents</span><span class="value">${Object.keys(d.shadow_agents || {}).length}</span></div>
                 `;
             } catch(e) {
                 document.getElementById('model-card').innerHTML = '<h2>Model Server</h2><div class="error">Offline: ' + e.message + '</div>';

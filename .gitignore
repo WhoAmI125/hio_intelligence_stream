@@ -28,9 +28,11 @@ _tests_archive/
 tmp_*/
 tmp*/
 test_data_tier2/
+scratch/
 *.db
 *.sqlite*
 *.log
+*.jsonl
 
 # Media outputs
 *.mp4

@@ -144,6 +144,7 @@ def init_db():
             use_video_validation INTEGER DEFAULT 1,
             cashier_zone TEXT DEFAULT '[]',
             drawer_zone TEXT DEFAULT '[]',
+            display_name TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
@@ -156,6 +157,12 @@ def init_db():
         CREATE INDEX IF NOT EXISTS idx_gemini_logs_created ON gemini_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_cameras_updated_at ON cameras(updated_at);
     """)
+    # Idempotent migration: add display_name to existing deployments.
+    _cols = {row["name"] for row in conn.execute("PRAGMA table_info(cameras)").fetchall()}
+    if "display_name" not in _cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN display_name TEXT DEFAULT ''")
+        conn.commit()
+        logger.info("Migrated cameras table: added display_name column")
     conn.close()
     logger.info(f"Database initialized: {DB_PATH}")
 
@@ -210,6 +217,7 @@ class CameraConfigRequest(BaseModel):
     use_video_validation: bool = True
     cashier_zone: list[list[float]] = []
     drawer_zone: list[list[float]] = []
+    display_name: str = ""
 
 
 def _is_valid_rtsp_url(rtsp_url: str) -> bool:
@@ -257,8 +265,16 @@ def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     except Exception:
         drawer_zone = []
 
+    # display_name column may not exist on very old DBs (migration runs at init_db).
+    try:
+        raw_display = row["display_name"]
+    except (IndexError, KeyError):
+        raw_display = ""
+    display_name = (raw_display or "").strip()
+
     return {
         "camera_id": row["camera_id"],
+        "display_name": display_name,
         "rtsp_url": row["rtsp_url"],
         "base_fps": float(row["base_fps"] or 1.5),
         "rtsp_transport": row["rtsp_transport"] or "tcp",
@@ -333,6 +349,7 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
         "use_video_validation": 1 if req.use_video_validation else 0,
         "cashier_zone": json.dumps(_normalize_zone_points(req.cashier_zone), ensure_ascii=False),
         "drawer_zone": json.dumps(_normalize_zone_points(req.drawer_zone), ensure_ascii=False),
+        "display_name": str(req.display_name or "").strip()[:80],
     }
 
     conn = get_db()
@@ -341,8 +358,8 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
         INSERT INTO cameras (
             camera_id, rtsp_url, base_fps, rtsp_transport, open_timeout_ms, read_timeout_ms,
             event_cooldown_sec, clip_duration_sec, validation_clip_sec, evidence_mode,
-            use_video_validation, cashier_zone, drawer_zone, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+            use_video_validation, cashier_zone, drawer_zone, display_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
         ON CONFLICT(camera_id) DO UPDATE SET
             rtsp_url = excluded.rtsp_url,
             base_fps = excluded.base_fps,
@@ -356,6 +373,7 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
             use_video_validation = excluded.use_video_validation,
             cashier_zone = excluded.cashier_zone,
             drawer_zone = excluded.drawer_zone,
+            display_name = excluded.display_name,
             updated_at = datetime('now', 'localtime')
         """,
         (
@@ -372,6 +390,7 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
             payload["use_video_validation"],
             payload["cashier_zone"],
             payload["drawer_zone"],
+            payload["display_name"],
         ),
     )
     conn.commit()

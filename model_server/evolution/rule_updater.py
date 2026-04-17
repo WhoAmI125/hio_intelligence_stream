@@ -37,7 +37,7 @@ class RuleUpdater:
     Usage:
         updater = RuleUpdater(prompts_dir="agents/prompts", versions_dir="data/rule_versions")
 
-        # Called by ShadowAgent when disagreement rate is high
+        # Called when disagreement rate is high (currently unused — slated for removal)
         updater.apply_feedback_to_rules("cash", "T1 missed drawer signals...")
 
         # Get version history

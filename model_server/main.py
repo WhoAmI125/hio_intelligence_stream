@@ -5,7 +5,7 @@ Tier 1 (Florence-2) + Tier 2 (Gemini) detection pipeline.
 
 Endpoints:
     GET  /                  → health check
-    GET  /status            → system status (streams, shadow, critic)
+    GET  /status            → system status (streams, critic)
     POST /api/start_stream  → start RTSP camera stream
     POST /api/stop_stream   → stop camera stream
     POST /api/analyze_frame → one-shot frame analysis (for testing)
@@ -38,7 +38,6 @@ from model_server.stream_manager import StreamManager
 from model_server.local_storage import LocalStorage
 from model_server.flush_worker import FlushWorker
 from model_server.agents.dynamic_agent import DynamicAgent
-from model_server.agents.shadow_agent import ShadowAgent
 from model_server.evolution.critic_trainer import CriticTrainer
 from model_server.evolution.rule_updater import RuleUpdater
 from model_server.lora.data_collector import DataCollector
@@ -60,7 +59,6 @@ gemini_validator = None          # GeminiValidator instance (Tier 2)
 pipeline_orchestrator = None     # ScenarioOrchestrator instance (Tier 1 parallel)
 evidence_router = None           # EvidenceRouter instance
 agents: dict[str, DynamicAgent] = {}
-shadow_agents: dict[str, ShadowAgent] = {}
 critic_trainer: CriticTrainer | None = None
 rule_updater: RuleUpdater | None = None
 data_collector: DataCollector | None = None
@@ -326,7 +324,7 @@ async def _restore_cameras_after_startup() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global stream_manager, local_storage, flush_worker
-    global florence_adapter, gemini_validator, pipeline_orchestrator, evidence_router, agents, shadow_agents
+    global florence_adapter, gemini_validator, pipeline_orchestrator, evidence_router, agents
     global critic_trainer, rule_updater, data_collector, inference_scheduler, event_postprocessor
     global is_shutting_down, startup_restore_task
 
@@ -478,20 +476,6 @@ async def lifespan(app: FastAPI):
         gemini_api_key=config.GEMINI_API_KEY,
     )
 
-    # Shadow Agents
-    for scenario in ["cash", "fire", "violence"]:
-        sa = ShadowAgent(
-            scenario_name=scenario,
-            critic_trainer=critic_trainer,
-            rule_updater=rule_updater,
-            batch_size=config.SHADOW_BATCH_SIZE,
-            persist_dir=config.SHADOW_PERSIST_DIR,
-            max_queue_size=config.SHADOW_MAX_QUEUE,
-            prompts_dir=prompts_dir,
-        )
-        sa.start()
-        shadow_agents[scenario] = sa
-
     # Data Collector for LoRA training
     data_collector = DataCollector(
         base_dir=config.LORA_DATA_DIR,
@@ -584,8 +568,6 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning(f"Startup restore task shutdown warning: {e}")
     startup_restore_task = None
-    for sa in shadow_agents.values():
-        sa.stop()
     if flush_worker:
         flush_worker.stop()
     logger.info("Model Server stopped.")
@@ -651,9 +633,6 @@ def system_status():
         "streams": stream_manager.get_all_stats() if stream_manager else {},
         "storage": local_storage.get_stats() if local_storage else {},
         "flush": flush_worker.get_stats() if flush_worker else {},
-        "shadow_agents": {
-            name: sa.get_stats() for name, sa in shadow_agents.items()
-        },
         "agents_loaded": list(agents.keys()),
         "florence_loaded": florence_adapter is not None,
         "florence_device_requested": dev["requested"],
@@ -759,11 +738,6 @@ def analyze_frame(
     if result.get("is_detected"):
         event_id = f"ev_{int(time.time() * 1000)}"
         local_storage.save_event(event_id, result)
-
-        # Push to shadow for async evaluation
-        shadow = shadow_agents.get(scenario)
-        if shadow:
-            shadow.enqueue({"event_id": event_id, **result})
 
     return result
 

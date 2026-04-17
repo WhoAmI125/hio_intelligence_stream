@@ -1,0 +1,844 @@
+{% extends "vlm_pipeline/base_public.html" %}
+{% block title %}Labeling{% endblock %}
+{% block page_title %}Ground-Truth Labeling{% endblock %}
+{% block page_subtitle %}현금거래 이벤트 하나씩 검토해서 정답을 기록합니다. 단축키: 1 TP · 2 FP · 3 Unclear · N 다음 · P 이전 · R 오버레이 토글{% endblock %}
+{% block top_actions %}
+<span id="labelerBadge" class="muted" style="margin-right:8px;">labeler: <b id="labelerName">(미설정)</b></span>
+<button id="btnHelp" class="btn">도움말</button>
+<button id="btnChangeLabeler" class="btn">이름 변경</button>
+<button id="btnReload" class="btn main">새로고침</button>
+{% endblock %}
+
+{% block extra_css %}
+<style>
+  .btn { border:1px solid var(--line); border-radius:9px; padding:8px 12px; background:#fff; color:var(--text); font-size:13px; font-weight:800; cursor:pointer; }
+  .btn.main { background: var(--accent); color:#fff; border-color: var(--accent); }
+  .btn:disabled { opacity:.5; cursor:not-allowed; }
+  .filters { display:flex; flex-wrap:wrap; gap:8px; margin-bottom:12px; align-items:flex-end; }
+  .field { display:flex; flex-direction:column; gap:4px; min-width:150px; }
+  .field label { font-size:12px; color:var(--sub); font-weight:700; }
+  .field input, .field select { border:1px solid var(--line); border-radius:9px; padding:8px 10px; font-size:13px; background:#fff; outline:none; }
+
+  .progress-wrap { display:grid; grid-template-columns:repeat(6,minmax(110px,1fr)); gap:10px; margin-bottom:14px; }
+  .pstat { border:1px solid var(--line); border-radius:12px; background:#fff; padding:10px 12px; }
+  .pstat .k { font-size:11px; color:var(--sub); font-weight:700; margin-bottom:4px; }
+  .pstat .v { font-size:22px; font-weight:800; color:#1a2b42; }
+  .pstat.tp .v { color:#0f7e4d; }
+  .pstat.fp .v { color:#b11e47; }
+  .pstat.unc .v { color:#8d5a05; }
+  .pstat.rem .v { color:#2d3f59; }
+
+  .card { border:1px solid var(--line); border-radius:14px; background:#fff; padding:16px; }
+  .row2 { display:grid; grid-template-columns:minmax(0,1.35fr) minmax(0,1fr); gap:16px; align-items:start; }
+  @media (max-width:1100px) { .row2 { grid-template-columns:1fr; } }
+
+  .video-wrap { background:#0b1626; border-radius:12px; overflow:hidden; aspect-ratio:16/9; display:flex; align-items:center; justify-content:center; }
+  .video-wrap video { width:100%; height:100%; object-fit:contain; background:#000; }
+  .video-meta { margin-top:8px; font-size:12px; color:var(--sub); display:flex; flex-wrap:wrap; gap:8px 14px; }
+  .video-meta b { color:var(--text); }
+  .overlay-toggle { display:flex; align-items:center; gap:10px; margin-top:8px; }
+  .overlay-toggle .chip { display:inline-flex; align-items:center; border:1px solid var(--line); border-radius:999px; padding:4px 10px; font-size:11px; font-weight:800; color:#2d3f59; background:#f7faff; }
+
+  .decide-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:8px; margin-top:10px; }
+  .decide-btn { border:2px solid transparent; border-radius:12px; padding:16px 10px; font-size:16px; font-weight:800; cursor:pointer; text-align:center; transition:transform .05s ease; }
+  .decide-btn:active { transform:scale(0.97); }
+  .decide-btn.tp  { background:#e4f8ec; color:#0f7e4d; border-color:#a7e3c1; }
+  .decide-btn.fp  { background:#fde7ed; color:#b11e47; border-color:#f2b3c3; }
+  .decide-btn.unc { background:#fff3de; color:#8d5a05; border-color:#f4cc80; }
+  .decide-btn.chosen { outline:3px solid #1d67d7; }
+  .decide-btn .shortcut { display:block; margin-top:4px; font-size:11px; font-weight:700; opacity:.7; }
+
+  .err-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:8px; }
+  .err-chip { border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:12px; font-weight:700; cursor:pointer; background:#fff; color:#425a7a; text-align:center; }
+  .err-chip.active { background:#1d67d7; color:#fff; border-color:#1d67d7; }
+
+  .note-row { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
+  .note-row textarea { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; font-family:inherit; resize:vertical; min-height:60px; }
+
+  .gem-block { margin-top:10px; border:1px solid var(--line); border-radius:10px; padding:10px; background:#f7faff; }
+  .gem-block h4 { margin:0 0 4px; font-size:12px; color:#355070; font-weight:800; }
+  .gem-pill { display:inline-flex; align-items:center; border:1px solid transparent; border-radius:999px; padding:2px 8px; font-size:11px; font-weight:800; margin-right:6px; }
+  .gem-pill.accept { color:#145c39; background:#ddf9eb; border-color:#8cddb4; }
+  .gem-pill.decline { color:#952045; background:#ffe8ef; border-color:#f6acbf; }
+  .gem-reason { margin-top:6px; font-size:12px; line-height:1.5; color:#20344e; white-space:pre-wrap; }
+
+  .nav-row { margin-top:14px; display:flex; gap:8px; justify-content:space-between; align-items:center; }
+  .kbd-hint { font-size:11px; color:var(--sub); }
+  .muted { color:var(--sub); font-size:12px; }
+
+  .empty { padding:40px; text-align:center; color:var(--sub); font-size:13px; }
+
+  /* Onboarding / help overlay */
+  .welcome-card { border:1px solid var(--line); border-radius:14px; background:#fff; padding:24px; max-width:920px; margin:0 auto; }
+  .welcome-card h2 { margin:0 0 8px; font-size:22px; color:#1a2b42; }
+  .welcome-card p { margin:0 0 16px; font-size:14px; line-height:1.6; color:#425a7a; }
+  .welcome-card .steps { display:grid; grid-template-columns:1fr 1fr 1fr; gap:12px; margin:16px 0 20px; }
+  @media (max-width:800px) { .welcome-card .steps { grid-template-columns:1fr; } }
+  .welcome-card .step { border:1px solid var(--line); border-radius:10px; padding:14px; background:#f7faff; }
+  .welcome-card .step .num { display:inline-flex; width:26px; height:26px; border-radius:50%; background:#1d67d7; color:#fff; font-weight:800; align-items:center; justify-content:center; margin-right:6px; font-size:13px; }
+  .welcome-card .step h3 { margin:0 0 6px; font-size:14px; color:#1a2b42; }
+  .welcome-card .step p { margin:0; font-size:12px; line-height:1.5; color:#425a7a; }
+  .welcome-card .criteria-grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin:10px 0 0; }
+  @media (max-width:800px) { .welcome-card .criteria-grid { grid-template-columns:1fr; } }
+  .welcome-card .crit { border:1px solid var(--line); border-radius:10px; padding:10px 12px; background:#fff; font-size:12px; line-height:1.5; color:#425a7a; }
+  .welcome-card .crit.tp { border-color:#a7e3c1; background:#e4f8ec; }
+  .welcome-card .crit.fp { border-color:#f2b3c3; background:#fde7ed; }
+  .welcome-card .crit.unc { border-color:#f4cc80; background:#fff3de; }
+  .welcome-card .crit b { color:#1a2b42; font-weight:800; }
+  .welcome-card .labeler-row { display:flex; gap:8px; align-items:center; margin-top:18px; padding-top:14px; border-top:1px dashed var(--line); }
+  .welcome-card .labeler-row label { font-size:13px; font-weight:700; color:#1a2b42; white-space:nowrap; }
+  .welcome-card .labeler-row input { flex:1; border:1px solid var(--line); border-radius:9px; padding:10px 12px; font-size:14px; outline:none; }
+  .welcome-card .labeler-row input:focus { border-color:#9dc2ff; box-shadow:0 0 0 3px rgba(18,88,212,0.12); }
+  .welcome-card .labeler-row .start-btn { padding:10px 18px; font-size:14px; font-weight:800; }
+  .welcome-card .labeler-err { font-size:12px; color:#b11e47; margin-top:6px; display:none; }
+
+  /* Inline shortcut hint panel on labeling card */
+  .shortcuts-hint { margin-top:10px; padding:10px 12px; background:#f7faff; border:1px solid var(--line); border-radius:10px; display:flex; flex-wrap:wrap; gap:8px 14px; font-size:12px; color:#425a7a; }
+  .shortcuts-hint code { display:inline-block; padding:1px 6px; background:#fff; border:1px solid var(--line); border-radius:4px; font-weight:700; color:#1a2b42; font-size:11px; font-family:ui-monospace,monospace; margin-right:4px; }
+
+  /* No-clip placeholder */
+  .video-wrap.no-clip { background:#1a2433; color:#7a8db0; font-size:13px; padding:0 20px; text-align:center; flex-direction:column; gap:6px; }
+  .video-wrap.no-clip .icn { font-size:32px; opacity:.4; }
+
+  /* Event list panel (direct clip selection) */
+  .main-grid { display:grid; grid-template-columns: 320px minmax(0,1fr); gap:16px; }
+  @media (max-width:1100px) { .main-grid { grid-template-columns:1fr; } }
+  .events-panel { border:1px solid var(--line); border-radius:14px; background:#fff; padding:12px; height: 78vh; display:flex; flex-direction:column; }
+  .events-head { font-size:12px; font-weight:800; color:#1a2b42; margin-bottom:8px; display:flex; justify-content:space-between; align-items:center; }
+  .events-head .count { color:var(--sub); font-weight:700; }
+  .events-list { flex:1; overflow-y:auto; display:flex; flex-direction:column; gap:4px; padding-right:2px; }
+  .ev-row { border:1px solid var(--line); border-radius:8px; padding:8px 10px; cursor:pointer; background:#fff; transition:background .08s ease; }
+  .ev-row:hover { background:#f7faff; }
+  .ev-row.active { border-color:#1d67d7; background:#eaf2fe; box-shadow: inset 0 0 0 1px #1d67d7; }
+  .ev-row .ev-top { display:flex; justify-content:space-between; font-size:11px; color:var(--sub); font-weight:700; margin-bottom:2px; }
+  .ev-row .ev-mid { font-size:12px; color:#1a2b42; font-weight:700; display:flex; justify-content:space-between; align-items:center; gap:6px; }
+  .ev-row .ev-cam { color:#425a7a; font-weight:700; }
+  .ev-row .ev-badge { display:inline-block; padding:1px 6px; border-radius:4px; font-size:10px; font-weight:800; letter-spacing:0.02em; }
+  .ev-badge.tp { background:#e4f8ec; color:#0f7e4d; }
+  .ev-badge.fp { background:#fde7ed; color:#b11e47; }
+  .ev-badge.unc { background:#fff3de; color:#8d5a05; }
+  .ev-badge.unlabeled { background:#eef3fb; color:#425a7a; }
+  .ev-badge.gacc { background:#ddf9eb; color:#145c39; }
+  .ev-badge.grej { background:#ffe8ef; color:#952045; }
+  .ev-row .ev-bot { font-size:11px; color:var(--sub); margin-top:2px; display:flex; justify-content:space-between; gap:6px; }
+  .ev-row .ev-noclip { font-size:10px; color:#b11e47; }
+
+  .events-list-empty { padding:20px; text-align:center; color:var(--sub); font-size:12px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div id="welcomeSection">
+  <div class="welcome-card">
+    <h2>현금거래 Ground-Truth 라벨링</h2>
+    <p>
+      AI(Gemini)가 판정한 현금거래 이벤트 영상을 한 건씩 검토해서 <b>정답 라벨</b>을 남깁니다.
+      라벨이 쌓이면 모델 튜닝과 성능 측정(A/B)이 가능해집니다. 지금 <b>0건</b> 라벨링 된 상태라면 여기서부터가 시작입니다.
+    </p>
+
+    <div class="steps">
+      <div class="step">
+        <h3><span class="num">1</span>영상 재생</h3>
+        <p>클립이 자동 재생됩니다. 10초 길이. 필요하면 다시 돌려 보세요.</p>
+      </div>
+      <div class="step">
+        <h3><span class="num">2</span>판정 선택</h3>
+        <p>키보드 <code>1</code> TP · <code>2</code> FP · <code>3</code> Unclear. 또는 오른쪽 버튼 클릭.</p>
+      </div>
+      <div class="step">
+        <h3><span class="num">3</span>저장 &amp; 다음</h3>
+        <p><code>N</code> 키 또는 "저장 &amp; 다음" 버튼. 자동으로 다음 이벤트로 넘어갑니다.</p>
+      </div>
+    </div>
+
+    <h3 style="margin:18px 0 8px; font-size:15px; color:#1a2b42;">판정 기준</h3>
+    <div class="criteria-grid">
+      <div class="crit tp">
+        <b>TP (cash이 맞음)</b><br>
+        지폐/동전이 손에서 손으로 오가거나, 캐셔가 서랍에서 현금 꺼내기/넣기가 <b>영상에서 보이면</b> TP.
+      </div>
+      <div class="crit fp">
+        <b>FP (cash 아님)</b><br>
+        카드, 영수증, 스마트폰, 종이봉투 등 다른 물체만 오가거나, 사람 없음/대화만 있으면 FP.
+      </div>
+      <div class="crit unc">
+        <b>Unclear (판단 불가)</b><br>
+        손 가려짐/저해상도/각도 문제로 물체 식별이 안 되면 Unclear. FP/Unclear는 한 줄 메모 필수.
+      </div>
+    </div>
+
+    <div class="labeler-row">
+      <label for="welcomeLabeler">이름 또는 식별자:</label>
+      <input id="welcomeLabeler" type="text" placeholder="예: 홍길동, ops-1 (로컬 저장, 저장 요청마다 동봉)" maxlength="40">
+      <button id="welcomeStart" class="btn main start-btn">시작하기</button>
+    </div>
+    <div id="welcomeErr" class="labeler-err">이름을 입력해 주세요.</div>
+  </div>
+</div>
+
+<div id="labelingSection" style="display:none;">
+<div class="filters">
+  <div class="field">
+    <label>날짜</label>
+    <select id="fDate"><option value="">실시간(오늘)</option></select>
+  </div>
+  <div class="field">
+    <label>카메라</label>
+    <select id="fCamera"><option value="">전체</option></select>
+  </div>
+  <div class="field">
+    <label>범위</label>
+    <select id="fScope">
+      <option value="unlabeled">라벨 안된 것만 (권장)</option>
+      <option value="all">전체 이벤트</option>
+      <option value="labeled">이미 라벨된 것</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>순서</label>
+    <select id="fOrder">
+      <option value="random">무작위 (권장)</option>
+      <option value="chrono">오래된 것부터</option>
+      <option value="reverse">최근 것부터</option>
+    </select>
+  </div>
+  <div class="field">
+    <label>오버레이 숨김 (blind)</label>
+    <select id="fBlind">
+      <option value="yes">예 — plain clip 먼저 (편향 방지)</option>
+      <option value="no">아니오 — overlay clip 바로</option>
+    </select>
+  </div>
+</div>
+
+<div class="progress-wrap">
+  <div class="pstat rem"><div class="k">Queue</div><div class="v" id="pRem">0</div></div>
+  <div class="pstat"><div class="k">Reviewed</div><div class="v" id="pDone">0</div></div>
+  <div class="pstat tp"><div class="k">TP</div><div class="v" id="pTP">0</div></div>
+  <div class="pstat fp"><div class="k">FP</div><div class="v" id="pFP">0</div></div>
+  <div class="pstat unc"><div class="k">Unclear</div><div class="v" id="pUnc">0</div></div>
+  <div class="pstat"><div class="k">Total</div><div class="v" id="pTotal">0</div></div>
+</div>
+
+<div class="main-grid">
+<aside class="events-panel">
+  <div class="events-head">
+    <span>이벤트 리스트</span>
+    <span class="count" id="evCount">0</span>
+  </div>
+  <div id="eventsList" class="events-list"></div>
+</aside>
+
+<div id="labelingCard" class="card">
+  <div class="row2">
+    <div>
+      <div id="videoBox" class="video-wrap"><video id="clipVideo" controls autoplay muted playsinline preload="auto"></video></div>
+      <div class="video-meta" id="clipMeta"></div>
+      <div class="overlay-toggle">
+        <button id="btnToggleOverlay" class="btn">오버레이 보기 (R)</button>
+        <span id="overlayChip" class="chip">plain clip</span>
+      </div>
+      <div class="gem-block">
+        <h4>Gemini 판정 (참고용 — 반드시 영상을 직접 보고 판단하세요)</h4>
+        <div id="gemPills"></div>
+        <div id="gemReason" class="gem-reason"></div>
+      </div>
+    </div>
+
+    <div>
+      <div class="decide-grid">
+        <button class="decide-btn tp" data-dec="accept">TP <span class="shortcut">1 · cash 맞음</span></button>
+        <button class="decide-btn fp" data-dec="decline">FP <span class="shortcut">2 · cash 아님</span></button>
+        <button class="decide-btn unc" data-dec="unsure">Unclear <span class="shortcut">3 · 판단 불가</span></button>
+      </div>
+
+      <div id="errSection" style="display:none; margin-top:12px;">
+        <div class="muted">FP 유형 선택 (선택사항)</div>
+        <div class="err-grid">
+          <button class="err-chip" data-err="phone_or_device">폰/기기</button>
+          <button class="err-chip" data-err="receipt_or_paper">영수증/종이</button>
+          <button class="err-chip" data-err="card">카드</button>
+          <button class="err-chip" data-err="empty_scene">빈 장면</button>
+          <button class="err-chip" data-err="staff_only">직원만</button>
+          <button class="err-chip" data-err="no_transfer">전달 없음</button>
+          <button class="err-chip" data-err="other">기타</button>
+        </div>
+      </div>
+
+      <div class="note-row">
+        <label for="noteBox" class="muted">메모 (FP/Unclear는 한 줄 이상 필수)</label>
+        <textarea id="noteBox" placeholder="예: 캐셔가 고객에게 KRW 10000 지폐 건넴 / 스마트폰만 교환 / 손이 가려져서 불명확"></textarea>
+      </div>
+
+      <div class="nav-row">
+        <span class="kbd-hint">단축키: 1/2/3 · N 저장&다음 · P 이전 · R 오버레이 · ⇧S 스킵</span>
+        <div>
+          <button id="btnPrev" class="btn">◀ 이전 (P)</button>
+          <button id="btnSkip" class="btn">스킵 (⇧S)</button>
+          <button id="btnSave" class="btn main">저장 & 다음 (N)</button>
+        </div>
+      </div>
+      <div id="saveMsg" class="muted" style="margin-top:6px;"></div>
+    </div>
+  </div>
+
+  <div class="shortcuts-hint">
+    <span><code>1</code>TP</span>
+    <span><code>2</code>FP</span>
+    <span><code>3</code>Unclear</span>
+    <span><code>N</code>저장 &amp; 다음</span>
+    <span><code>P</code>이전</span>
+    <span><code>R</code>오버레이 토글</span>
+    <span><code>⇧S</code>스킵(저장 안 함)</span>
+  </div>
+</div>
+
+<div id="emptyCard" class="card" style="display:none;">
+  <div class="empty">
+    <div style="font-size:16px; font-weight:700; color:#1a2b42; margin-bottom:6px;">큐가 비어 있습니다</div>
+    <div>범위/날짜/카메라 필터를 바꾸거나 "새로고침" 버튼을 눌러 주세요.<br>새 이벤트는 수 분 간격으로 쌓입니다.</div>
+  </div>
+</div>
+</div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+(function () {
+  const ALLOWED_ERROR = new Set([
+    'phone_or_device','receipt_or_paper','card','empty_scene','staff_only','no_transfer','other'
+  ]);
+
+  const ui = {
+    all: [],       // all events loaded
+    queue: [],     // working queue after filtering + sorting
+    cursor: 0,     // current index in queue
+    decision: null,
+    errorType: null,
+    overlayMode: 'plain',   // 'plain' | 'overlay'
+    labeler: localStorage.getItem('hio_labeler') || '',
+    blind: true,
+    cameraNames: {}, // camera_id -> display_name
+  };
+
+  function displayNameFor(camId){
+    const id = String(camId || '').trim();
+    if (!id) return '-';
+    const n = ui.cameraNames[id];
+    return (n && String(n).trim()) ? String(n).trim() : id;
+  }
+
+  async function loadCameraNames(){
+    try {
+      const r = await fetch('/api/proxy/cameras');
+      const d = await r.json().catch(()=>({}));
+      const map = {};
+      (Array.isArray(d.cameras) ? d.cameras : []).forEach(c => {
+        if (c && c.camera_id) map[String(c.camera_id)] = String(c.display_name || '');
+      });
+      ui.cameraNames = map;
+    } catch(e){ /* ignore */ }
+  }
+
+  function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,(c)=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function $(id){ return document.getElementById(id); }
+
+  function setLabelerBadge(){
+    $('labelerName').textContent = ui.labeler || '(미설정)';
+  }
+
+  function commitLabeler(name){
+    const n = String(name || '').trim().slice(0, 40);
+    if (!n) return false;
+    ui.labeler = n;
+    localStorage.setItem('hio_labeler', n);
+    setLabelerBadge();
+    return true;
+  }
+
+  function showWelcome(){
+    $('welcomeSection').style.display = '';
+    $('labelingSection').style.display = 'none';
+    const input = $('welcomeLabeler');
+    if (input) { input.value = ui.labeler || ''; input.focus(); }
+  }
+
+  function hideWelcome(){
+    $('welcomeSection').style.display = 'none';
+    $('labelingSection').style.display = '';
+  }
+
+  function askLabelerInline(){
+    // Used for "이름 변경" button — simple inline prompt that does NOT block on first load.
+    const n = prompt('라벨러 이름 또는 식별자 (브라우저에 저장됩니다):', ui.labeler || '');
+    if (n && n.trim()){
+      commitLabeler(n);
+    }
+  }
+
+  function shuffle(arr){
+    for (let i = arr.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random() * (i + 1));
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    }
+    return arr;
+  }
+
+  async function loadEvents(){
+    const d = $('fDate').value;
+    const params = new URLSearchParams({ limit: '1000' });
+    if (d) params.set('date', d);
+    const res = await fetch('/api/vlm/events/?' + params.toString());
+    const data = await res.json().catch(() => ({}));
+    ui.all = (Array.isArray(data.events) ? data.events : []).filter(ev =>
+      String(ev.event_type || ev.scenario || '').toLowerCase() === 'cash'
+    );
+    bindDateOptions(Array.isArray(data.dates) ? data.dates : []);
+    bindCameraOptions(ui.all);
+    applyFilters();
+  }
+
+  function bindDateOptions(dates){
+    const sel = $('fDate');
+    const prev = sel.value;
+    const opts = ['<option value="">realtime(today)</option>'];
+    dates.forEach(d => opts.push(`<option value="${esc(d)}">${esc(d)}</option>`));
+    sel.innerHTML = opts.join('');
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
+
+  function bindCameraOptions(events){
+    const sel = $('fCamera');
+    const prev = sel.value;
+    const ids = [...new Set(events.map(ev => String(ev.camera_id || '').trim()).filter(Boolean))].sort();
+    const opts = ['<option value="">전체</option>'];
+    ids.forEach(id => {
+      const label = displayNameFor(id);
+      const display = label !== id ? `${label} (${id})` : id;
+      opts.push(`<option value="${esc(id)}">${esc(display)}</option>`);
+    });
+    sel.innerHTML = opts.join('');
+    if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+  }
+
+  function isLabeled(ev){
+    const hf = ev.human_feedback;
+    return hf && typeof hf === 'object' && ['accept','decline','unsure'].includes(String(hf.decision || '').toLowerCase());
+  }
+
+  function applyFilters(){
+    const camera = String($('fCamera').value || '').toLowerCase();
+    const scope = $('fScope').value;
+    const order = $('fOrder').value;
+    ui.blind = ($('fBlind').value === 'yes');
+
+    let pool = ui.all.slice();
+    if (camera) pool = pool.filter(ev => String(ev.camera_id || '').toLowerCase() === camera);
+    if (scope === 'unlabeled') pool = pool.filter(ev => !isLabeled(ev));
+    else if (scope === 'labeled') pool = pool.filter(isLabeled);
+
+    if (order === 'random') pool = shuffle(pool);
+    else if (order === 'chrono') pool.sort((a,b) => String(a.at || '').localeCompare(String(b.at || '')));
+    else pool.sort((a,b) => String(b.at || '').localeCompare(String(a.at || '')));
+
+    ui.queue = pool;
+    ui.cursor = 0;
+
+    renderProgress();
+    renderEventsList();
+    renderCurrent();
+  }
+
+  function fmtTimeShort(iso){
+    try {
+      const d = new Date(iso);
+      if (isNaN(d.getTime())) return String(iso || '').slice(0, 16);
+      const hh = String(d.getHours()).padStart(2,'0');
+      const mm = String(d.getMinutes()).padStart(2,'0');
+      const ss = String(d.getSeconds()).padStart(2,'0');
+      return `${hh}:${mm}:${ss}`;
+    } catch(e) { return String(iso || '').slice(0, 16); }
+  }
+
+  function humanLabel(ev){
+    const hf = ev.human_feedback || {};
+    const d = String(hf.decision || '').toLowerCase();
+    if (d === 'accept')  return { cls:'tp', txt:'TP' };
+    if (d === 'decline') return { cls:'fp', txt:'FP' };
+    if (d === 'unsure')  return { cls:'unc', txt:'Unclear' };
+    return { cls:'unlabeled', txt:'unlabeled' };
+  }
+
+  function geminiLabel(g){
+    if (!g || !g.state) return null;
+    if (g.validated === true)  return { cls:'gacc', txt:'G:accept' };
+    if (g.validated === false) return { cls:'grej', txt:'G:decline' };
+    return null;
+  }
+
+  function renderEventsList(){
+    const list = $('eventsList');
+    $('evCount').textContent = String(ui.queue.length);
+    if (!ui.queue.length){
+      list.innerHTML = '<div class="events-list-empty">표시할 이벤트가 없습니다.<br>필터를 바꾸거나 새로고침 하세요.</div>';
+      return;
+    }
+    const html = ui.queue.map((ev, idx) => {
+      const hl = humanLabel(ev);
+      const gl = geminiLabel(ev.gemini);
+      const hasClip = !!(ev.clip_url || ev.overlay_clip_url);
+      const conf = typeof ev.confidence === 'number' ? ev.confidence.toFixed(2) : '-';
+      const time = fmtTimeShort(ev.at);
+      const cam = esc(displayNameFor(ev.camera_id));
+      const badges = [
+        `<span class="ev-badge ${hl.cls}">${hl.txt}</span>`,
+        gl ? `<span class="ev-badge ${gl.cls}">${gl.txt}</span>` : '',
+      ].filter(Boolean).join(' ');
+      return `
+        <div class="ev-row ${idx === ui.cursor ? 'active' : ''}" data-idx="${idx}" title="${esc(ev.event_id || '')}">
+          <div class="ev-top"><span>${esc(time)}</span><span>#${idx + 1}</span></div>
+          <div class="ev-mid"><span class="ev-cam">${cam}</span>${badges}</div>
+          <div class="ev-bot">
+            <span>t1 conf ${esc(conf)}</span>
+            ${hasClip ? '' : '<span class="ev-noclip">no clip</span>'}
+          </div>
+        </div>
+      `;
+    }).join('');
+    list.innerHTML = html;
+
+    // Wire row clicks
+    list.querySelectorAll('.ev-row').forEach(row => {
+      row.addEventListener('click', () => {
+        const i = parseInt(row.dataset.idx, 10);
+        if (!isNaN(i) && i >= 0 && i < ui.queue.length){
+          ui.cursor = i;
+          renderCurrent();
+          updateActiveRow();
+        }
+      });
+    });
+  }
+
+  function updateActiveRow(){
+    const list = $('eventsList');
+    list.querySelectorAll('.ev-row').forEach((row) => {
+      const i = parseInt(row.dataset.idx, 10);
+      row.classList.toggle('active', i === ui.cursor);
+    });
+    // Scroll active row into view
+    const active = list.querySelector('.ev-row.active');
+    if (active && typeof active.scrollIntoView === 'function'){
+      active.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+    }
+  }
+
+  function renderProgress(){
+    const total = ui.all.length;
+    const done = ui.all.filter(isLabeled).length;
+    let tp = 0, fp = 0, unc = 0;
+    ui.all.forEach(ev => {
+      const dec = String((ev.human_feedback || {}).decision || '').toLowerCase();
+      if (dec === 'accept') tp++;
+      else if (dec === 'decline') fp++;
+      else if (dec === 'unsure') unc++;
+    });
+    $('pTotal').textContent = String(total);
+    $('pDone').textContent = String(done);
+    $('pTP').textContent = String(tp);
+    $('pFP').textContent = String(fp);
+    $('pUnc').textContent = String(unc);
+    $('pRem').textContent = String(Math.max(0, ui.queue.length - ui.cursor));
+  }
+
+  function currentEvent(){
+    if (ui.cursor < 0 || ui.cursor >= ui.queue.length) return null;
+    return ui.queue[ui.cursor];
+  }
+
+  function setOverlayMode(mode){
+    ui.overlayMode = mode;
+    const chip = $('overlayChip');
+    const btn = $('btnToggleOverlay');
+    if (mode === 'overlay'){
+      chip.textContent = 'overlay ON (yellow=cashier, cyan=drawer)';
+      chip.style.background = '#fff4c2';
+      btn.textContent = 'hide overlay (R)';
+    } else {
+      chip.textContent = 'plain clip';
+      chip.style.background = '#f7faff';
+      btn.textContent = 'reveal overlay (R)';
+    }
+    // Swap video src if both are available
+    const ev = currentEvent();
+    if (!ev) return;
+    applyVideoSrc(ev);
+  }
+
+  function applyVideoSrc(ev){
+    const vid = $('clipVideo');
+    const box = $('videoBox');
+    const plain = ev.clip_url || '';
+    const overlay = ev.overlay_clip_url || '';
+    let url = plain;
+    if (ui.overlayMode === 'overlay' && overlay) url = overlay;
+    if (ui.overlayMode === 'plain' && plain) url = plain;
+    else if (!plain && overlay) url = overlay;
+
+    // No clip available — show placeholder, skip video element.
+    if (!url){
+      vid.removeAttribute('src');
+      vid.style.display = 'none';
+      box.classList.add('no-clip');
+      if (!box.querySelector('.no-clip-msg')){
+        const d = document.createElement('div');
+        d.className = 'no-clip-msg';
+        d.innerHTML = '<div class="icn">⚠︎</div><div>이 이벤트에는 저장된 영상이 없습니다.<br>캡션과 Gemini 판정으로만 판단하거나 스킵(⇧S) 하세요.</div>';
+        box.appendChild(d);
+      }
+      return;
+    }
+
+    // Have clip — restore video, clear placeholder.
+    vid.style.display = '';
+    box.classList.remove('no-clip');
+    const placeholder = box.querySelector('.no-clip-msg');
+    if (placeholder) placeholder.remove();
+
+    if (vid.getAttribute('src') !== url){
+      vid.src = url;
+      const p = vid.play();
+      if (p && p.catch) p.catch(()=>{});
+    }
+  }
+
+  function renderCurrent(){
+    const ev = currentEvent();
+    const card = $('labelingCard');
+    const empty = $('emptyCard');
+    if (!ev){
+      card.style.display = 'none';
+      empty.style.display = 'block';
+      return;
+    }
+    card.style.display = '';
+    empty.style.display = 'none';
+
+    // reset decision state
+    ui.decision = null;
+    ui.errorType = null;
+    document.querySelectorAll('.decide-btn').forEach(b => b.classList.remove('chosen'));
+    document.querySelectorAll('.err-chip').forEach(b => b.classList.remove('active'));
+    $('errSection').style.display = 'none';
+    $('noteBox').value = '';
+    $('saveMsg').textContent = '';
+
+    // prefill if already labeled
+    const hf = ev.human_feedback || {};
+    if (hf.decision){
+      ui.decision = String(hf.decision).toLowerCase();
+      const btn = document.querySelector(`.decide-btn[data-dec="${ui.decision}"]`);
+      if (btn) btn.classList.add('chosen');
+      $('noteBox').value = hf.note || '';
+      if (hf.error_type && ALLOWED_ERROR.has(hf.error_type)){
+        ui.errorType = hf.error_type;
+        const c = document.querySelector(`.err-chip[data-err="${ui.errorType}"]`);
+        if (c) c.classList.add('active');
+      }
+      if (ui.decision === 'decline') $('errSection').style.display = '';
+    }
+
+    // overlay mode per blind preference + reset per event
+    setOverlayMode(ui.blind ? 'plain' : (ev.overlay_clip_url ? 'overlay' : 'plain'));
+
+    // Meta
+    const g = ev.gemini || {};
+    const overlayApplied = ev.overlay_applied === true ? 'yes' : 'no';
+    const meta = [
+      `<span><b>event</b> ${esc(ev.event_id || '-')}</span>`,
+      `<span><b>at</b> ${esc(ev.at || '-')}</span>`,
+      `<span><b>카메라</b> ${esc(displayNameFor(ev.camera_id))}${ev.camera_id && displayNameFor(ev.camera_id) !== ev.camera_id ? ` <span style="color:var(--sub);">(id: ${esc(ev.camera_id)})</span>` : ''}</span>`,
+      `<span><b>t1 conf</b> ${typeof ev.confidence === 'number' ? ev.confidence.toFixed(2) : '-'}</span>`,
+      `<span><b>overlay_applied</b> ${overlayApplied}</span>`,
+      `<span><b>router</b> ${esc(ev.router_action || '-')}</span>`,
+    ];
+    $('clipMeta').innerHTML = meta.join(' ');
+
+    // Gemini
+    const gemState = g.validated === true ? 'accept' : (g.validated === false ? 'decline' : 'skip');
+    const pillHtml = g.state ? `<span class="gem-pill ${gemState}">Gemini ${gemState} · conf ${typeof g.confidence === 'number' ? g.confidence.toFixed(2) : '-'}</span>` : '<span class="muted">Gemini: not called</span>';
+    $('gemPills').innerHTML = pillHtml + (g.prompt_version ? `<span class="muted">${esc(g.prompt_version)}</span>` : '');
+    $('gemReason').textContent = String(g.reason || '').slice(0, 1200) || '(no reason)';
+
+    renderProgress();
+    updateActiveRow();
+  }
+
+  function pickDecision(dec){
+    if (!['accept','decline','unsure'].includes(dec)) return;
+    ui.decision = dec;
+    document.querySelectorAll('.decide-btn').forEach(b => b.classList.remove('chosen'));
+    const btn = document.querySelector(`.decide-btn[data-dec="${dec}"]`);
+    if (btn) btn.classList.add('chosen');
+    $('errSection').style.display = (dec === 'decline') ? '' : 'none';
+  }
+
+  function pickError(et){
+    if (!ALLOWED_ERROR.has(et)) return;
+    ui.errorType = et;
+    document.querySelectorAll('.err-chip').forEach(b => b.classList.toggle('active', b.dataset.err === et));
+  }
+
+  async function saveCurrent(){
+    const ev = currentEvent();
+    if (!ev){ return false; }
+    if (!ui.labeler){ showWelcome(); $('saveMsg').textContent = '라벨러 이름을 먼저 입력해 주세요.'; return false; }
+    if (!ui.decision){ $('saveMsg').textContent = 'Pick 1 (TP) / 2 (FP) / 3 (Unclear) first.'; return false; }
+
+    const note = $('noteBox').value.trim();
+    if ((ui.decision === 'decline' || ui.decision === 'unsure') && !note){
+      $('saveMsg').textContent = 'FP/Unclear requires a short note explaining why.';
+      return false;
+    }
+
+    const payload = {
+      event_id: ev.event_id,
+      camera_id: ev.camera_id || '',
+      scenario: String(ev.event_type || ev.scenario || 'cash').toLowerCase(),
+      decision: ui.decision,
+      note: note,
+      error_type: (ui.decision === 'decline' && ui.errorType) ? ui.errorType : '',
+      missed_focus: [],
+      suggestion: '',
+      labeler: ui.labeler,
+      overlay_mode_shown: ui.overlayMode,
+    };
+
+    try {
+      const res = await fetch('/api/vlm/feedback/', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success){
+        $('saveMsg').textContent = `Save failed: ${data.error || res.status}`;
+        return false;
+      }
+      // Update in-memory ev so filters/progress stay consistent
+      ev.human_feedback = {
+        decision: ui.decision,
+        note,
+        error_type: payload.error_type,
+        at: new Date().toISOString(),
+        labeler: ui.labeler,
+        overlay_mode_shown: ui.overlayMode,
+      };
+      $('saveMsg').textContent = 'saved.';
+      renderEventsList();  // Reflect new TP/FP badge in list
+      return true;
+    } catch (err) {
+      $('saveMsg').textContent = `Save failed: ${err}`;
+      return false;
+    }
+  }
+
+  async function nextEvent(){
+    ui.cursor += 1;
+    if (ui.cursor >= ui.queue.length){
+      // If unlabeled scope, refresh
+      if ($('fScope').value === 'unlabeled') applyFilters();
+      else renderCurrent();
+      return;
+    }
+    renderCurrent();
+  }
+
+  function prevEvent(){
+    if (ui.cursor > 0){
+      ui.cursor -= 1;
+      renderCurrent();
+    }
+  }
+
+  async function saveAndNext(){
+    const ok = await saveCurrent();
+    if (ok) nextEvent();
+  }
+
+  function toggleOverlay(){
+    const ev = currentEvent();
+    if (!ev) return;
+    if (!ev.overlay_clip_url){ $('saveMsg').textContent = 'No overlay clip for this event.'; return; }
+    setOverlayMode(ui.overlayMode === 'overlay' ? 'plain' : 'overlay');
+  }
+
+  // Event wiring
+  document.addEventListener('DOMContentLoaded', () => {
+    setLabelerBadge();
+
+    // Welcome flow — show onboarding if no labeler is set. No blocking prompt().
+    if (!ui.labeler){
+      showWelcome();
+    } else {
+      hideWelcome();
+    }
+
+    $('welcomeStart').addEventListener('click', () => {
+      const v = $('welcomeLabeler').value;
+      if (!v || !v.trim()){
+        $('welcomeErr').style.display = '';
+        return;
+      }
+      $('welcomeErr').style.display = 'none';
+      if (commitLabeler(v)){
+        hideWelcome();
+        loadCameraNames().then(loadEvents);
+      }
+    });
+    $('welcomeLabeler').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') $('welcomeStart').click();
+    });
+    $('btnHelp').addEventListener('click', showWelcome);
+
+    $('btnChangeLabeler').addEventListener('click', askLabelerInline);
+    $('btnReload').addEventListener('click', loadEvents);
+
+    ['fDate','fCamera','fScope','fOrder','fBlind'].forEach(id => {
+      $(id).addEventListener('change', applyFilters);
+    });
+
+    $('btnToggleOverlay').addEventListener('click', toggleOverlay);
+
+    document.querySelectorAll('.decide-btn').forEach(btn => {
+      btn.addEventListener('click', () => pickDecision(btn.dataset.dec));
+    });
+    document.querySelectorAll('.err-chip').forEach(chip => {
+      chip.addEventListener('click', () => pickError(chip.dataset.err));
+    });
+
+    $('btnPrev').addEventListener('click', prevEvent);
+    $('btnSkip').addEventListener('click', nextEvent);
+    $('btnSave').addEventListener('click', saveAndNext);
+
+    document.addEventListener('keydown', (e) => {
+      if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
+      if (e.key === '1') { pickDecision('accept'); }
+      else if (e.key === '2') { pickDecision('decline'); }
+      else if (e.key === '3') { pickDecision('unsure'); }
+      else if (e.key === 'n' || e.key === 'N') { saveAndNext(); }
+      else if (e.key === 'p' || e.key === 'P') { prevEvent(); }
+      else if (e.key === 'r' || e.key === 'R') { toggleOverlay(); }
+      else if ((e.key === 's' || e.key === 'S') && e.shiftKey) { nextEvent(); }
+    });
+
+    // Load events only when labeler is set; otherwise welcome stays visible.
+    if (ui.labeler){
+      loadCameraNames().then(loadEvents);
+    }
+  });
+})();
+</script>
+{% endblock %}

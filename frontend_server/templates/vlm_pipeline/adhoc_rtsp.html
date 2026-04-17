@@ -249,7 +249,8 @@
 
         <section>
           <div class="fields">
-            <div class="field"><label for="sCamId">Camera ID</label><input id="sCamId" readonly /></div>
+            <div class="field"><label for="sCamId">Camera ID (고정)</label><input id="sCamId" readonly /></div>
+            <div class="field"><label for="sDisplayName">표시명 (자유 편집)</label><input id="sDisplayName" placeholder="비우면 Camera ID 사용" maxlength="80" /></div>
             <div class="field"><label for="sBaseFps">Base FPS</label><input id="sBaseFps" /></div>
             <div class="field full"><label for="sRtsp">RTSP URL</label><input id="sRtsp" /></div>
             <div class="field"><label for="sTransport">Transport</label><input id="sTransport" value="tcp" /></div>
@@ -367,6 +368,7 @@
   const zoneCtx = zoneCanvas.getContext("2d");
   const zoneMeta = document.getElementById("zoneMeta");
   const sCamId = document.getElementById("sCamId");
+  const sDisplayName = document.getElementById("sDisplayName");
   const sRtsp = document.getElementById("sRtsp");
   const sBaseFps = document.getElementById("sBaseFps");
   const sTransport = document.getElementById("sTransport");
@@ -630,6 +632,7 @@
   function normalizeCamera(cam) {
     return {
       camera_id: String(cam.camera_id || "").trim(),
+      display_name: String(cam.display_name || "").trim().slice(0, 80),
       rtsp_url: String(cam.rtsp_url || "").trim(),
       base_fps: Number(cam.base_fps || 1.5),
       rtsp_transport: String(cam.rtsp_transport || "tcp").trim() || "tcp",
@@ -643,21 +646,29 @@
     };
   }
 
+  function displayNameFor(camId) {
+    const cfg = cameras[camId];
+    const name = cfg && cfg.display_name ? String(cfg.display_name).trim() : "";
+    return name || String(camId || "");
+  }
+
   function cardHTML(camId) {
+    const displayName = displayNameFor(camId);
+    const idSubtitle = displayName !== camId ? `<div class="cam-meta">id: ${esc(camId)}</div>` : `<span class="cam-meta">Click to configure</span>`;
     return `
       <article class="cam-card" data-camera="${esc(camId)}" title="Click to open settings">
         <div class="cam-thumb">
-          <img class="cam-live" src="/api/vlm/video/?camera_id=${encodeURIComponent(camId)}" alt="${esc(camId)} live" />
+          <img class="cam-live" src="/api/vlm/video/?camera_id=${encodeURIComponent(camId)}" alt="${esc(displayName)} live" />
           <div class="cam-overlay">
             <div class="cam-top">
-              <div class="cam-name">${esc(camId)}</div>
+              <div class="cam-name">${esc(displayName)}</div>
               <span class="pill warn card-pill">STOPPED</span>
             </div>
             <div class="cam-bottom card-summary">status loading...</div>
           </div>
         </div>
         <div class="cam-foot">
-          <span class="cam-meta">Click to configure</span>
+          ${idSubtitle}
           <button class="btn small" data-action="open" data-camera="${esc(camId)}" type="button">Settings</button>
         </div>
       </article>
@@ -810,10 +821,11 @@
     if (!cfg) return;
     selectedCameraId = camId;
     setZoneMode("cashier");
-    setTitle.textContent = `Camera Settings - ${camId}`;
+    setTitle.textContent = `Camera Settings - ${displayNameFor(camId)}`;
     setLive.src = `/api/vlm/video/?camera_id=${encodeURIComponent(camId)}`;
 
     sCamId.value = cfg.camera_id || camId;
+    sDisplayName.value = cfg.display_name || "";
     sRtsp.value = cfg.rtsp_url || "";
     sBaseFps.value = String(cfg.base_fps ?? 1.5);
     sTransport.value = cfg.rtsp_transport || "tcp";
@@ -905,6 +917,7 @@
   function readSettingsConfig() {
     return normalizeCamera({
       camera_id: selectedCameraId,
+      display_name: String(sDisplayName.value || "").trim().slice(0, 80),
       rtsp_url: sRtsp.value,
       base_fps: Number(sBaseFps.value || 1.5),
       rtsp_transport: sTransport.value,

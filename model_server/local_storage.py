@@ -27,9 +27,74 @@ import os
 import shutil
 import subprocess
 import cv2
+import numpy as np
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+
+# Overlay drawing helpers for visual-hint clips/thumbnails
+# cashier: yellow polygon, drawer: cyan polygon
+_OVERLAY_COLORS: Dict[str, Tuple[int, int, int]] = {
+    "cashier": (0, 255, 255),
+    "drawer": (255, 255, 0),
+}
+_OVERLAY_LABELS: Dict[str, str] = {
+    "cashier": "CASHIER ZONE",
+    "drawer": "DRAWER",
+}
+
+
+def _draw_polygon_overlay(
+    frame: "np.ndarray",
+    polygons: Dict[str, List[List[int]]],
+    thickness: int = 3,
+) -> "np.ndarray":
+    """Draw named polygon OUTLINES on a copy of frame.
+
+    Outline only (no fill). Filling tints the interior and biases VLM
+    color judgement for cash/receipt objects; stroke-only keeps the
+    attention hint without touching pixel content.
+
+    polygons: {"cashier": [[x,y],...], "drawer": [[x,y],...]}
+    Returns a new BGR array. Input frame is not mutated.
+    """
+    if not polygons:
+        return frame
+    out = frame.copy()
+    for name, pts in polygons.items():
+        if not pts or len(pts) < 3:
+            continue
+        color = _OVERLAY_COLORS.get(name, (0, 255, 255))
+        label = _OVERLAY_LABELS.get(name, name.upper())
+        try:
+            arr = np.array(pts, dtype=np.int32).reshape(-1, 1, 2)
+            cv2.polylines(
+                out,
+                [arr],
+                isClosed=True,
+                color=color,
+                thickness=thickness,
+                lineType=cv2.LINE_AA,
+            )
+            # label near the top-left of the polygon (no background box)
+            x0 = int(min(p[0] for p in pts))
+            y0 = int(min(p[1] for p in pts))
+            y0 = max(16, y0 - 6)
+            cv2.putText(
+                out,
+                label,
+                (x0, y0),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.55,
+                color,
+                2,
+                cv2.LINE_AA,
+            )
+        except Exception:
+            # never break clip saving due to overlay draw issues
+            continue
+    return out
 
 try:
     import boto3
@@ -270,6 +335,7 @@ class LocalStorage:
         fps: float = 15.0,
         codec: str = "mp4v",
         allow_s3: bool = True,
+        overlay_polygons: Optional[Dict[str, List[List[int]]]] = None,
     ) -> Optional[str]:
         """
         Save a list of OpenCV frames as an MP4 clip.
@@ -281,6 +347,8 @@ class LocalStorage:
             frames: List of BGR np.ndarray frames
             fps: Output video FPS
             codec: FourCC codec string for OpenCV fallback path
+            overlay_polygons: Optional {"cashier": pts, "drawer": pts} to burn
+                yellow/cyan zone overlays into the saved clip.
 
         Returns:
             URL/Path to saved clip, or None on failure.
@@ -307,7 +375,10 @@ class LocalStorage:
             fourcc = cv2.VideoWriter_fourcc(*"MJPG")
             writer = cv2.VideoWriter(str(temp_path), fourcc, fps, (w, h))
             for frame in frames:
-                writer.write(frame)
+                if overlay_polygons:
+                    writer.write(_draw_polygon_overlay(frame, overlay_polygons))
+                else:
+                    writer.write(frame)
             writer.release()
 
             # Step 2: Convert to H.264 using FFmpeg
@@ -367,7 +438,10 @@ class LocalStorage:
                     fallback_fourcc = cv2.VideoWriter_fourcc(*codec)
                     fallback = cv2.VideoWriter(str(final_path), fallback_fourcc, fps, (w, h))
                     for frame in frames:
-                        fallback.write(frame)
+                        if overlay_polygons:
+                            fallback.write(_draw_polygon_overlay(frame, overlay_polygons))
+                        else:
+                            fallback.write(frame)
                     fallback.release()
                 except Exception as fallback_err:
                     logger.error(f"[LocalStorage] OpenCV fallback save failed: {fallback_err}")
@@ -413,7 +487,11 @@ class LocalStorage:
     # ------------------------------------------------------------------
 
     def save_thumbnail(
-        self, event_id: str, frame, quality: int = 85
+        self,
+        event_id: str,
+        frame,
+        quality: int = 85,
+        overlay_polygons: Optional[Dict[str, List[List[int]]]] = None,
     ) -> Optional[str]:
         """
         Save the last frame as a JPEG thumbnail for event list preview.
@@ -422,6 +500,7 @@ class LocalStorage:
             event_id: Event identifier (used as filename)
             frame: BGR np.ndarray (last frame of the clip)
             quality: JPEG quality (0-100)
+            overlay_polygons: Optional zone overlays to burn in.
 
         Returns:
             Path to saved thumbnail, or None on failure.
@@ -433,7 +512,12 @@ class LocalStorage:
         day_dir.mkdir(parents=True, exist_ok=True)
         filepath = day_dir / f"{event_id}.jpg"
         try:
-            cv2.imwrite(str(filepath), frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
+            out_frame = (
+                _draw_polygon_overlay(frame, overlay_polygons)
+                if overlay_polygons
+                else frame
+            )
+            cv2.imwrite(str(filepath), out_frame, [cv2.IMWRITE_JPEG_QUALITY, quality])
             logger.debug(f"[LocalStorage] Saved thumbnail: {filepath}")
             
             s3_url = _upload_to_s3(str(filepath), f"thumbnails/{date_str}/{event_id}.jpg")

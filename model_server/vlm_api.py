@@ -23,7 +23,7 @@ import threading
 from contextlib import nullcontext
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 from urllib.parse import urlparse
 
 import cv2
@@ -91,7 +91,7 @@ def _normalize_event_media_links(event: Any) -> Any:
     if not isinstance(event, dict):
         return event
     out = dict(event)
-    for key in ("clip_url", "thumbnail_url"):
+    for key in ("clip_url", "thumbnail_url", "overlay_clip_url", "overlay_snapshot_url"):
         if key in out:
             out[key] = _to_public_media_url(out.get(key))
     gem = out.get("gemini")
@@ -126,32 +126,26 @@ def _save_clip_serialized(
     *,
     fps: float,
     allow_s3: bool = True,
+    overlay_polygons: Optional[dict[str, list[list[int]]]] = None,
 ) -> Any:
     if storage is None or not frames:
         return None
 
     _clip_save_slots.acquire()
     try:
-        return storage.save_clip(event_id, frames, fps=fps, allow_s3=allow_s3)
+        return storage.save_clip(
+            event_id,
+            frames,
+            fps=fps,
+            allow_s3=allow_s3,
+            overlay_polygons=overlay_polygons,
+        )
     finally:
         _clip_save_slots.release()
 
 
 def _is_api_error_reason(reason: Any) -> bool:
     return str(reason or "").strip().lower().startswith("api error:")
-
-
-def _append_shadow_feedback_record(record: dict[str, Any]) -> None:
-    """Persist manual shadow feedback as JSONL for audit/evolution data."""
-    try:
-        persist_dir = Path(getattr(server_config, "SHADOW_PERSIST_DIR", str(_DATA_ROOT / "shadow_feedback")))
-        persist_dir.mkdir(parents=True, exist_ok=True)
-        day = datetime.now().strftime("%Y%m%d")
-        path = persist_dir / f"manual_feedback_{day}.jsonl"
-        with path.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record, ensure_ascii=False, default=str) + "\n")
-    except Exception as e:
-        logger.warning(f"[VLM API] shadow feedback persist skipped: {e}")
 
 
 def _validate_rtsp_url(rtsp_url: str) -> tuple[str | None, str | None]:
@@ -1200,44 +1194,51 @@ async def vlm_crop_preview(zone: str = "cashier", camera_id: str = "adhoc_cam"):
 async def vlm_feedback(request: Request):
     body = await request.json()
     event_id = body.get("event_id", "")
-    decision = body.get("decision", "")
-    note = body.get("note", "")
+    decision = str(body.get("decision", "")).strip().lower()
+    if decision in {"not_decide", "not-decide"}:
+        decision = "unsure"
+    note = str(body.get("note", "") or "").strip()
     camera_id = body.get("camera_id", "adhoc_cam")
+    labeler = str(body.get("labeler", "") or "").strip()[:40]
+    overlay_mode_shown = str(body.get("overlay_mode_shown", "") or "").strip().lower()
+    if overlay_mode_shown not in {"plain", "overlay", ""}:
+        overlay_mode_shown = ""
+
+    if decision not in {"accept", "decline", "unsure"}:
+        return JSONResponse(
+            {"success": False, "error": "decision must be accept|decline|unsure"},
+            status_code=400,
+        )
 
     srv = _get_server_modules()
     state = _get_or_create_state(camera_id)
+
+    now_iso = datetime.now().isoformat()
+    feedback_obj = {
+        "decision": decision,
+        "note": note,
+        "error_type": body.get("error_type", ""),
+        "missed_focus": body.get("missed_focus", []),
+        "suggestion": body.get("suggestion", ""),
+        "labeler": labeler,
+        "overlay_mode_shown": overlay_mode_shown,
+        "source": str(body.get("source", "api") or "api"),
+        "at": now_iso,
+    }
 
     # Update local storage
     if srv.local_storage:
         ev = srv.local_storage.get_event(event_id)
         if ev:
-            ev["human_feedback"] = {
-                "decision": decision,
-                "note": note,
-                "error_type": body.get("error_type", ""),
-                "missed_focus": body.get("missed_focus", []),
-                "suggestion": body.get("suggestion", ""),
-                "at": datetime.now().isoformat(),
-            }
+            ev["human_feedback"] = feedback_obj
             srv.local_storage.save_event(event_id, ev)
 
-    # Also update in-memory recent events
-    for ev in state["recent_events"]:
-        if ev.get("event_id") == event_id:
-            ev["human_feedback"] = {
-                "decision": decision,
-                "note": note,
-                "at": datetime.now().isoformat(),
-            }
-            break
-
-    # Feed to shadow agent for evolution learning
-    for sa in srv.shadow_agents.values():
-        sa.enqueue({
-            "event_id": event_id,
-            "human_feedback": decision,
-            "note": note,
-        })
+    # Also update in-memory recent events (cross-camera lookup)
+    for cam_state in _camera_states.values():
+        for ev in cam_state.get("recent_events", []):
+            if ev.get("event_id") == event_id:
+                ev["human_feedback"] = feedback_obj
+                break
 
     logger.info(f"[VLM API] Feedback for {camera_id}: {event_id} ??{decision}")
 
@@ -1254,171 +1255,6 @@ async def vlm_feedback(request: Request):
             logger.debug(f"[VLM API] DataCollector feedback error: {dc_err}")
 
     return {"success": True}
-
-
-# ---------------------------------------------------------------------------
-# Shadow agent endpoints (for monitor_shadow.html)
-# ---------------------------------------------------------------------------
-@router.get("/shadow/recent/")
-def vlm_shadow_recent(limit: int = 120):
-    srv = _get_server_modules()
-    results = []
-    for name, sa in srv.shadow_agents.items():
-        stats = sa.get_stats()
-        results.append({
-            "scenario": name,
-            **stats,
-        })
-    return {"agents": results}
-
-
-@router.post("/shadow/feedback/")
-async def vlm_shadow_feedback(request: Request):
-    body = await request.json()
-
-    event_id = str(body.get("event_id", "")).strip()
-    if not event_id:
-        return JSONResponse({"success": False, "error": "event_id is required"}, status_code=400)
-
-    raw_decision = str(body.get("decision", "")).strip().lower()
-    if raw_decision in {"not_decide", "not-decide"}:
-        raw_decision = "unsure"
-    if raw_decision not in {"accept", "decline", "unsure"}:
-        return JSONResponse(
-            {"success": False, "error": "decision must be accept|decline|unsure"},
-            status_code=400,
-        )
-
-    note = str(body.get("note", "")).strip()
-    error_type = str(body.get("error_type", "")).strip().lower()
-    if error_type not in {"false_positive", "false_negative", "wrong_class", "weak_reason", "other", ""}:
-        error_type = "other"
-
-    missed_focus_raw = body.get("missed_focus", [])
-    missed_focus: list[str] = []
-    if isinstance(missed_focus_raw, list):
-        for x in missed_focus_raw:
-            item = str(x or "").strip()
-            if item:
-                missed_focus.append(item[:64])
-    suggestion = str(body.get("suggestion", "")).strip()[:400]
-    source = str(body.get("source", "api")).strip() or "api"
-    override = bool(body.get("override", False))
-
-    srv = _get_server_modules()
-    now_iso = datetime.now().isoformat()
-
-    # Try to locate event context from memory and local storage.
-    memory_event: dict[str, Any] | None = None
-    memory_camera_id = ""
-    for cam_id, state in _camera_states.items():
-        for ev in state.get("recent_events", []):
-            if str(ev.get("event_id", "")).strip() == event_id:
-                memory_event = ev
-                memory_camera_id = str(cam_id)
-                break
-        if memory_event is not None:
-            break
-
-    stored_event: dict[str, Any] | None = None
-    if srv.local_storage:
-        try:
-            stored_event = srv.local_storage.get_event(event_id)
-        except Exception:
-            stored_event = None
-
-    scenario = str(body.get("scenario", "")).strip().lower()
-    if not scenario and memory_event:
-        scenario = str(memory_event.get("event_type") or memory_event.get("scenario") or "").strip().lower()
-    if not scenario and stored_event:
-        scenario = str(stored_event.get("event_type") or stored_event.get("scenario") or "").strip().lower()
-
-    camera_id = str(body.get("camera_id", "")).strip()
-    if not camera_id:
-        if memory_event:
-            camera_id = str(memory_event.get("camera_id") or "").strip()
-        elif stored_event:
-            camera_id = str(stored_event.get("camera_id") or "").strip()
-    if not camera_id:
-        camera_id = memory_camera_id
-
-    feedback_obj = {
-        "decision": raw_decision,
-        "note": note,
-        "error_type": error_type,
-        "missed_focus": missed_focus[:12],
-        "suggestion": suggestion,
-        "override": override,
-        "source": source,
-        "at": now_iso,
-    }
-
-    # Persist feedback into local event JSON (if found).
-    local_saved = False
-    if stored_event is not None and srv.local_storage:
-        try:
-            stored_event["shadow_feedback"] = feedback_obj
-            srv.local_storage.save_event(event_id, stored_event)
-            local_saved = True
-        except Exception as e:
-            logger.warning(f"[VLM API] shadow feedback local save failed ({event_id}): {e}")
-
-    # Update in-memory recent event cache for active cameras.
-    memory_updated = 0
-    for state in _camera_states.values():
-        for ev in state.get("recent_events", []):
-            if str(ev.get("event_id", "")).strip() == event_id:
-                ev["shadow_feedback"] = feedback_obj
-                memory_updated += 1
-
-    # Feed feedback to scenario shadow-agent path (not main feedback API).
-    enqueued = False
-    if scenario and getattr(srv, "shadow_agents", None) and scenario in srv.shadow_agents:
-        tier1_src = memory_event or stored_event or {}
-        tier1_result = {
-            "is_detected": bool(tier1_src.get("is_detected", False)),
-            "confidence": float(tier1_src.get("confidence", 0.0) or 0.0),
-            "matched_keywords": tier1_src.get("matched_keywords", []),
-            "event_type": scenario,
-            "camera_id": camera_id,
-        }
-        shadow_event = {
-            "event_id": event_id,
-            "camera_id": camera_id,
-            "scenario": scenario,
-            "tier1_result": tier1_result,
-            "human_feedback": raw_decision,
-            "feedback_meta": feedback_obj,
-        }
-        try:
-            enqueued = bool(srv.shadow_agents[scenario].enqueue(shadow_event))
-        except Exception as e:
-            logger.warning(f"[VLM API] shadow enqueue failed ({event_id}/{scenario}): {e}")
-
-    # Always append manual feedback record for audit/training corpus.
-    _append_shadow_feedback_record(
-        {
-            "event_id": event_id,
-            "camera_id": camera_id,
-            "scenario": scenario,
-            "feedback": feedback_obj,
-            "shadow_enqueued": enqueued,
-            "local_saved": local_saved,
-            "memory_updated": memory_updated,
-            "ts": now_iso,
-        }
-    )
-
-    return {
-        "success": True,
-        "event_id": event_id,
-        "camera_id": camera_id,
-        "scenario": scenario,
-        "shadow_enqueued": enqueued,
-        "local_saved": local_saved,
-        "memory_updated": memory_updated,
-        "feedback": feedback_obj,
-    }
 
 
 # ---------------------------------------------------------------------------
@@ -1643,13 +1479,6 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
             except Exception:
                 pass
 
-        shadow = srv.shadow_agents.get(scenario_name)
-        if shadow:
-            shadow.enqueue({
-                "event_id": event_id,
-                "tier1_result": result,
-            })
-
         logger.info(
             "[VLM API] Detection (%s): %s conf=%.2f zone=%s tier2=%s queued=%s",
             camera_id,
@@ -1682,7 +1511,20 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
 
     clip_frames_for_lora: list[Any] = []
     val_clip_path = None
+    val_entries: list[dict[str, Any]] = []
     postprocess_ok = True
+
+    # Zone overlays for visual hint (cashier yellow, drawer cyan).
+    # Only cash uses overlays; fire/violence keep full-frame context.
+    overlay_polygons: dict[str, list[list[int]]] = {}
+    if scenario_name == "cash":
+        cz = state.get("cashier_zone", []) or []
+        dz = state.get("drawer_zone", []) or []
+        if len(cz) >= 3:
+            overlay_polygons["cashier"] = list(cz)
+        if len(dz) >= 3:
+            overlay_polygons["drawer"] = list(dz)
+    event["overlay_applied"] = bool(overlay_polygons)
 
     try:
         if needs_tier2 and srv.gemini_validator is not None:
@@ -1706,12 +1548,15 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
                             ts1 = float(val_entries[-1].get("mono_ts", 0) or 0)
                             v_fps = len(val_entries) / max(ts1 - ts0, 0.1)
                             v_fps = min(max(v_fps, 1.0), 30.0)
+                            # Gemini receives the OVERLAY version of the clip.
+                            # For non-cash scenarios overlay_polygons is empty → behaves as before.
                             val_clip_path = _save_clip_serialized(
                                 srv.local_storage,
                                 f"val_{event['event_id']}",
                                 val_frames,
                                 fps=v_fps,
                                 allow_s3=False,
+                                overlay_polygons=overlay_polygons or None,
                             )
 
                     validation_packet = _build_validation_packet(
@@ -1767,19 +1612,33 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
                 event["gemini"]["state"] = "error"
                 event["gemini"]["reason"] = str(gem_err)
 
-            if val_clip_path and os.path.exists(val_clip_path):
-                try:
-                    os.remove(val_clip_path)
-                except OSError:
-                    pass
+            # Retain val_clip on disk: it is the exact media Gemini scored,
+            # and will also serve as fallback if the permanent clip save below
+            # ever fails (e.g. ring-buffer eviction race).
         if srv.local_storage and srv.stream_manager:
             try:
-                clip_seconds = float(state.get("clip_duration_sec", 10))
-                clip_entries = srv.stream_manager.get_clip_frames(
-                    camera_id,
-                    window_sec=clip_seconds,
-                    anchor_mono_ts=anchor_mono_ts,
-                )
+                # Align permanent-clip duration with validation clip so UI and
+                # Gemini see the same time window.
+                clip_seconds = float(state.get("validation_clip_sec", 10))
+                # Reuse val_entries when Gemini path already fetched them;
+                # this eliminates a second get_clip_frames() call that could
+                # race against ring-buffer eviction during Gemini wait.
+                if val_entries:
+                    clip_entries = val_entries
+                else:
+                    clip_entries = srv.stream_manager.get_clip_frames(
+                        camera_id,
+                        window_sec=clip_seconds,
+                        anchor_mono_ts=anchor_mono_ts,
+                    )
+                if not clip_entries:
+                    logger.warning(
+                        "[VLM API] Permanent clip skipped (%s/%s): empty clip_entries "
+                        "(anchor_mono_ts=%s, val_entries=%d, val_clip=%s)",
+                        camera_id, event.get("event_id"),
+                        anchor_mono_ts, len(val_entries),
+                        "present" if val_clip_path else "none",
+                    )
                 if clip_entries:
                     clip_frames = [e["frame"] for e in clip_entries if e.get("frame") is not None]
                     if clip_frames:
@@ -1809,9 +1668,34 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
                                 clip_fps,
                             )
 
-                        thumb_path = srv.local_storage.save_thumbnail(event["event_id"], clip_frames[-1])
+                        # Additionally save an OVERLAY version (yellow/cyan zone
+                        # polygons burned in) for UI/forensics. The Gemini input
+                        # uses its own short val_clip_path above.
+                        if overlay_polygons:
+                            overlay_clip_path = _save_clip_serialized(
+                                srv.local_storage,
+                                f"{event['event_id']}_roi",
+                                clip_frames,
+                                fps=clip_fps,
+                                overlay_polygons=overlay_polygons,
+                            )
+                            if overlay_clip_path:
+                                event["overlay_clip_url"] = overlay_clip_path
+
+                        thumb_path = srv.local_storage.save_thumbnail(
+                            event["event_id"], clip_frames[-1]
+                        )
                         if thumb_path:
                             event["thumbnail_url"] = thumb_path
+
+                        if overlay_polygons:
+                            overlay_thumb_path = srv.local_storage.save_thumbnail(
+                                f"{event['event_id']}_roi",
+                                clip_frames[-1],
+                                overlay_polygons=overlay_polygons,
+                            )
+                            if overlay_thumb_path:
+                                event["overlay_snapshot_url"] = overlay_thumb_path
             except Exception as clip_err:
                 postprocess_ok = False
                 logger.warning("[VLM API] Clip/thumbnail save failed (%s): %s", camera_id, clip_err)
@@ -1843,6 +1727,18 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
         logger.warning("[VLM API] postprocess error (%s/%s): %s", camera_id, event.get("event_id"), e)
     finally:
         event["postprocess_state"] = "done" if postprocess_ok else "error"
+        # Fallback: if permanent clip save produced nothing but the retained
+        # val_clip exists, promote val_clip to clip_url so the UI/DB always
+        # has a playable media reference.
+        if not event.get("clip_url") and val_clip_path and os.path.exists(val_clip_path):
+            event["clip_url"] = val_clip_path
+            if overlay_polygons and not event.get("overlay_clip_url"):
+                # val_clip already has the overlay baked in.
+                event["overlay_clip_url"] = val_clip_path
+            logger.info(
+                "[VLM API] Clip fallback to val_clip (%s/%s): %s",
+                camera_id, event.get("event_id"), val_clip_path,
+            )
         if not isinstance(state.get("last_validation"), dict):
             state["last_validation"] = {}
         state["last_validation"][scenario_name] = dict(event.get("gemini", {}))

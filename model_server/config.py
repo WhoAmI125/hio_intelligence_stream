@@ -156,15 +156,8 @@ EVIDENCE_MODE = os.getenv("EVIDENCE_MODE", "video_only")
 # ---------------------------------------------------------------------------
 
 CRITIC_ENABLED = _env_bool("CRITIC_ENABLED", False)
-CRITIC_SHADOW_MODE = _env_bool("CRITIC_SHADOW_MODE", True)
 CRITIC_MODEL_DIR = str(DATA_DIR / "critic_models")
 CRITIC_MIN_SAMPLES = _env_int("CRITIC_MIN_SAMPLES", 30)
-
-# Shadow Agent
-SHADOW_BATCH_SIZE = _env_int("SHADOW_BATCH_SIZE", 30)
-SHADOW_PERSIST_DIR = str(DATA_DIR / "shadow_feedback")
-SHADOW_MAX_QUEUE = _env_int("SHADOW_MAX_QUEUE", 200)
-SHADOW_DISAGREE_THRESHOLD = _env_float("SHADOW_DISAGREE_THRESHOLD", 0.30)
 
 # Rule Updater
 RULE_PROMPTS_DIR = os.getenv("RULE_PROMPTS_DIR", "")
