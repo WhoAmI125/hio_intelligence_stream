@@ -184,7 +184,7 @@ DB_SERVER_URL = os.getenv("DB_SERVER_URL", "http://localhost:8001")
 FLUSH_ENDPOINT = os.getenv("FLUSH_ENDPOINT", "/api/flush")
 FLUSH_INTERVAL_SEC = _env_int("FLUSH_INTERVAL_SEC", 3600)
 FLUSH_MAX_RETRIES = _env_int("FLUSH_MAX_RETRIES", 3)
-LOCAL_RETENTION_DAYS = _env_int("LOCAL_RETENTION_DAYS", 3)
+LOCAL_RETENTION_DAYS = _env_int("LOCAL_RETENTION_DAYS", 5)
 
 # ---------------------------------------------------------------------------
 # Florence Inference Logging
@@ -223,6 +223,40 @@ ROUTER_STEPS_PATH = os.getenv(
 
 CASH_DUAL_PATH_ENABLED = _env_bool("CASH_DUAL_PATH_ENABLED", True)
 CASH_GLOBAL_ASSIST_THRESHOLD = _env_float("CASH_GLOBAL_ASSIST_THRESHOLD", 0.30)
+
+# ---------------------------------------------------------------------------
+# YOLO-pose cash trigger (replaces Florence per-frame cash scanning)
+# ---------------------------------------------------------------------------
+YOLO_POSE_ENABLED = _env_bool("YOLO_POSE_ENABLED", False)
+YOLO_POSE_MODEL = os.getenv(
+    "YOLO_POSE_MODEL",
+    str(Path(__file__).resolve().parent.parent / "models" / "yolo" / "yolo26n-pose.pt"),
+)
+YOLO_POSE_DEVICE = os.getenv("YOLO_POSE_DEVICE", "cuda")
+YOLO_POSE_CONFIDENCE = _env_float("YOLO_POSE_CONFIDENCE", 0.3)
+YOLO_POSE_INPUT_SIZE = _env_int("YOLO_POSE_INPUT_SIZE", 640)
+
+# Cashier tracker parameters
+CASHIER_WATCH_SECONDS = _env_float("CASHIER_WATCH_SECONDS", 60.0)
+CASHIER_WATCH_MIN_OBS = _env_int("CASHIER_WATCH_MIN_OBS", 6)
+CASHIER_WRIST_CONF_THRESHOLD = _env_float("CASHIER_WRIST_CONF_THRESHOLD", 0.3)
+CASH_HAND_PROXIMITY_PX = _env_float("CASH_HAND_PROXIMITY_PX", 120.0)
+
+# If a person's wrist has been continuously inside cashier_zone for more than
+# this many seconds, force-reclassify them as customer. Staff's wrist typically
+# dips in and out of the zone while working; a person whose wrist is planted in
+# the zone for a long time is lingering (filling forms, signing) → customer.
+CASHIER_MAX_LINGER_SEC = _env_float("CASHIER_MAX_LINGER_SEC", 30.0)
+CASHIER_LINGER_GAP_TOLERANCE_SEC = _env_float("CASHIER_LINGER_GAP_TOLERANCE_SEC", 3.0)
+CASHIER_LINGER_CLUSTER_PX = _env_float("CASHIER_LINGER_CLUSTER_PX", 120.0)
+
+# Trigger-to-clip parameters
+CASH_TRIGGER_CLIP_SEC = _env_int("CASH_TRIGGER_CLIP_SEC", 14)
+CASH_TRIGGER_COOLDOWN_SEC = _env_float("CASH_TRIGGER_COOLDOWN_SEC", 20.0)
+CASH_TRIGGER_FLORENCE_FRAMES = _env_int("CASH_TRIGGER_FLORENCE_FRAMES", 6)
+# When Florence captions on the clip lack cash keywords but contain H2H-like
+# action words (handing/passing/exchanging), still escalate to Gemini.
+CASH_TRIGGER_H2H_ESCALATE = _env_bool("CASH_TRIGGER_H2H_ESCALATE", True)
 
 # ---------------------------------------------------------------------------
 # Logging

@@ -19,7 +19,14 @@
   .stat.ok .v { color:#0f7e4d; }
   .stat.no .v { color:#b11e47; }
   .stat.mid .v { color:#8d5a05; }
-  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; max-height:620px; background:#fff; }
+  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; background:#fff; }
+  .pager { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; align-items:center; margin:12px 0 4px; }
+  .pager .pg { min-width:34px; border:1px solid var(--line); background:#fff; color:var(--text); border-radius:8px; padding:6px 10px; font-size:13px; font-weight:700; cursor:pointer; }
+  .pager .pg:hover:not(:disabled) { background:#f4f8ff; border-color:#9dc2ff; }
+  .pager .pg.current { background:var(--primary); color:#fff; border-color:var(--primary); cursor:default; }
+  .pager .pg:disabled { opacity:0.5; cursor:not-allowed; }
+  .pager .pg.ellipsis { border:none; background:transparent; cursor:default; padding:6px 4px; }
+  .pager .summary { margin-left:10px; color:var(--sub); font-size:12px; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { padding:8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
   th { position:sticky; top:0; z-index:1; background:#f4f8ff; color:#355070; }
@@ -131,6 +138,8 @@
   </table>
 </div>
 
+<div id="pager" class="pager"></div>
+
 <div id="reasonModal" class="modal" role="dialog" aria-modal="true">
   <div class="modal-card">
     <div class="modal-head">
@@ -238,7 +247,11 @@
 {% block extra_js %}
 <script>
   const rowsEl = document.getElementById("rows");
+  const pagerEl = document.getElementById("pager");
   let allEvents = [];
+
+  const PAGE_SIZE = 30;
+  let currentPage = 1;
 
   const ALLOWED_ERROR_TYPES = new Set([
     "false_positive",
@@ -603,6 +616,52 @@
     document.getElementById("sSkip").textContent = String(s);
   }
 
+  function buildPagerPages(current, total) {
+    if (total <= 7) {
+      return Array.from({ length: total }, (_, i) => i + 1);
+    }
+    const pages = new Set([1, total, current, current - 1, current + 1]);
+    if (current <= 4) [2, 3, 4, 5].forEach((p) => pages.add(p));
+    if (current >= total - 3) [total - 4, total - 3, total - 2, total - 1].forEach((p) => pages.add(p));
+    const sorted = [...pages].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
+    const out = [];
+    for (let i = 0; i < sorted.length; i += 1) {
+      if (i > 0 && sorted[i] - sorted[i - 1] > 1) out.push("...");
+      out.push(sorted[i]);
+    }
+    return out;
+  }
+
+  function renderPager(totalItems) {
+    const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+
+    if (totalItems === 0) {
+      pagerEl.innerHTML = "";
+      return;
+    }
+
+    const from = (currentPage - 1) * PAGE_SIZE + 1;
+    const to = Math.min(totalItems, currentPage * PAGE_SIZE);
+    const pages = buildPagerPages(currentPage, totalPages);
+
+    const parts = [];
+    parts.push(`<button class="pg" data-go="prev" ${currentPage === 1 ? "disabled" : ""}>&laquo; Prev</button>`);
+    pages.forEach((p) => {
+      if (p === "...") {
+        parts.push('<span class="pg ellipsis">...</span>');
+      } else if (p === currentPage) {
+        parts.push(`<button class="pg current" disabled>${p}</button>`);
+      } else {
+        parts.push(`<button class="pg" data-go="${p}">${p}</button>`);
+      }
+    });
+    parts.push(`<button class="pg" data-go="next" ${currentPage === totalPages ? "disabled" : ""}>Next &raquo;</button>`);
+    parts.push(`<span class="summary">${from}-${to} / ${totalItems}</span>`);
+    pagerEl.innerHTML = parts.join("");
+  }
+
   function renderTable(list) {
     if (!list.length) {
       rowsEl.innerHTML = '<tr><td colspan="9" class="muted">No gemini logs.</td></tr>';
@@ -658,12 +717,38 @@
   function render() {
     const list = filteredEvents();
     renderStats(list);
-    renderTable(list);
+    const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    if (currentPage > totalPages) currentPage = totalPages;
+    if (currentPage < 1) currentPage = 1;
+    const start = (currentPage - 1) * PAGE_SIZE;
+    renderTable(list.slice(start, start + PAGE_SIZE));
+    renderPager(list.length);
   }
 
+  function renderFromFilterChange() {
+    currentPage = 1;
+    render();
+  }
+
+  pagerEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-go]");
+    if (!btn) return;
+    const go = btn.dataset.go;
+    const list = filteredEvents();
+    const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
+    if (go === "prev") currentPage = Math.max(1, currentPage - 1);
+    else if (go === "next") currentPage = Math.min(totalPages, currentPage + 1);
+    else {
+      const n = parseInt(go, 10);
+      if (Number.isFinite(n)) currentPage = Math.min(totalPages, Math.max(1, n));
+    }
+    render();
+    document.querySelector(".table-wrap")?.scrollIntoView({ behavior: "smooth", block: "start" });
+  });
+
   ["fCameraSel", "fCamera", "fScenario", "fDecision"].forEach((id) => {
-    document.getElementById(id).addEventListener("input", render);
-    document.getElementById(id).addEventListener("change", render);
+    document.getElementById(id).addEventListener("input", renderFromFilterChange);
+    document.getElementById(id).addEventListener("change", renderFromFilterChange);
   });
 
   document.getElementById("fDate").addEventListener("change", loadEvents);

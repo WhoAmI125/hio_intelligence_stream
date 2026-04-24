@@ -50,6 +50,10 @@ _inference_lock = threading.Lock()
 _tier2_validation_slots = threading.BoundedSemaphore(
     max(1, int(getattr(server_config, "GEMINI_MAX_CONCURRENT", 1) or 1))
 )
+
+# Per-camera CashierTracker cache (created lazily)
+_cashier_trackers: dict[str, Any] = {}
+_cashier_tracker_lock = threading.Lock()
 _clip_save_slots = threading.BoundedSemaphore(
     max(1, int(getattr(server_config, "CLIP_SAVE_MAX_CONCURRENT", 1) or 1))
 )
@@ -383,6 +387,81 @@ def _queue_detection_postprocess(payload: dict[str, Any]) -> bool:
     if postprocessor is None:
         return False
     return bool(postprocessor.submit(payload))
+
+
+def _get_or_create_cashier_tracker(camera_id: str, state: dict[str, Any]):
+    """Return (or lazily create) a CashierTracker for this camera.
+
+    Tracker zones are refreshed from state every call so UI zone edits propagate
+    without needing service restart.
+    """
+    from model_server.cashier_tracker import CashierTracker
+
+    with _cashier_tracker_lock:
+        tracker = _cashier_trackers.get(camera_id)
+        if tracker is None:
+            tracker = CashierTracker(
+                camera_id=camera_id,
+                cashier_zone_norm=state.get("cashier_zone") or [],
+                drawer_zone_norm=state.get("drawer_zone") or [],
+                cashier_watch_seconds=float(getattr(server_config, "CASHIER_WATCH_SECONDS", 60.0)),
+                cashier_watch_min_obs=int(getattr(server_config, "CASHIER_WATCH_MIN_OBS", 6)),
+                wrist_conf_threshold=float(getattr(server_config, "CASHIER_WRIST_CONF_THRESHOLD", 0.3)),
+                hand_proximity_px=float(getattr(server_config, "CASH_HAND_PROXIMITY_PX", 120.0)),
+                cooldown_sec=float(getattr(server_config, "CASH_TRIGGER_COOLDOWN_SEC", 20.0)),
+                max_linger_sec=float(getattr(server_config, "CASHIER_MAX_LINGER_SEC", 30.0)),
+                linger_gap_tolerance_sec=float(getattr(server_config, "CASHIER_LINGER_GAP_TOLERANCE_SEC", 1.5)),
+                linger_cluster_px=float(getattr(server_config, "CASHIER_LINGER_CLUSTER_PX", 120.0)),
+            )
+            _cashier_trackers[camera_id] = tracker
+        else:
+            # Refresh zones if they changed
+            tracker.update_zones(
+                cashier_zone_norm=state.get("cashier_zone") or [],
+                drawer_zone_norm=state.get("drawer_zone") or [],
+            )
+        return tracker
+
+
+def _run_yolo_cash_gate(camera_id: str, frame: Any, state: dict[str, Any]) -> Optional[Any]:
+    """
+    Run YOLO-pose + CashierTracker. Returns trigger event if fired, else None.
+    Silently returns None if YOLO disabled or no cashier_zone configured.
+    """
+    srv = _get_server_modules()
+    yolo = getattr(srv, "yolo_pose_adapter", None)
+    if yolo is None or not yolo.is_ready():
+        return None
+
+    cashier_zone = state.get("cashier_zone") or []
+    if len(cashier_zone) < 3:
+        return None  # no zone → nothing to gate
+
+    try:
+        detections = yolo.detect(frame)
+    except Exception as exc:
+        logger.debug("[YOLO gate] detect error for %s: %s", camera_id, exc)
+        return None
+
+    tracker = _get_or_create_cashier_tracker(camera_id, state)
+    try:
+        trigger = tracker.update(
+            detections=detections,
+            frame_shape=frame.shape if hasattr(frame, "shape") else (0, 0, 0),
+            now_ts=time.time(),
+            now_mono=time.monotonic(),
+        )
+    except Exception as exc:
+        logger.debug("[YOLO gate] tracker error for %s: %s", camera_id, exc)
+        return None
+
+    state["last_yolo_detections"] = len(detections)
+    if trigger is not None:
+        logger.info(
+            "[YOLO gate] Cash trigger fired: camera=%s proximity=%.1fpx persons=%d",
+            camera_id, trigger.proximity_px, trigger.num_persons,
+        )
+    return trigger
 
 
 def _sample_entries(entries: list[dict[str, Any]], count: int) -> list[dict[str, Any]]:
@@ -1273,6 +1352,13 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
         state["current_fps"] = 1.0 / max(float(started_at) - float(prev_started), 0.001)
     state["last_inference_started_at"] = started_at
 
+    # YOLO-pose cash gate (runs before Florence; fires only when cashier_zone set
+    # AND a customer wrist comes close to a cashier wrist). Returns a trigger
+    # event or None. Fire/violence scenarios are untouched by this gate.
+    yolo_trigger = None
+    if bool(getattr(server_config, "YOLO_POSE_ENABLED", False)):
+        yolo_trigger = _run_yolo_cash_gate(camera_id, frame, state)
+
     cash_zone_applied = False
     cash_zone_bbox: list[int] | None = None
     scenario_results: dict[str, dict[str, Any]] = {}
@@ -1370,6 +1456,39 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
             state["last_error"] = "Florence-2 not loaded. Caption analysis only."
         return
 
+    # If YOLO cash gate is enabled AND a cashier_zone is set for this camera,
+    # Florence per-frame cash scenario is no longer a source of cash events.
+    # YOLO trigger is the sole cash event source.
+    yolo_gate_active = (
+        bool(getattr(server_config, "YOLO_POSE_ENABLED", False))
+        and len(state.get("cashier_zone", []) or []) >= 3
+    )
+    if yolo_gate_active and "cash" in scenario_results:
+        cash_result = scenario_results.get("cash") or {}
+        cash_result["is_detected"] = False
+        cash_result["suppressed_by_yolo_gate"] = True
+        scenario_results["cash"] = cash_result
+
+    if yolo_trigger is not None and yolo_gate_active:
+        # Synthesize a cash scenario_results[cash] entry so downstream code
+        # (logging + event creation) picks it up via the usual path.
+        scenario_results["cash"] = {
+            "is_detected": True,
+            "confidence": 0.75,  # placeholder — real confidence decided by Gemini
+            "zone": "cashier_yolo",
+            "evidence": f"YOLO trigger: wrist proximity={yolo_trigger.proximity_px:.1f}px",
+            "raw_response": "",
+            "matched_keywords": ["_yolo_trigger"],
+            "object_hints": [],
+            "scenario_type": "cash",
+            "inference_time_ms": 0.0,
+            "source": "yolo_trigger",
+            "metadata": {
+                "yolo_trigger": yolo_trigger.to_dict(),
+            },
+            "yolo_triggered": True,
+        }
+
     if scenario_results:
         _append_inference_log(
             camera_id,
@@ -1446,6 +1565,18 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
             state["recent_events"] = state["recent_events"][-100:]
         _persist_event(camera_id, event)
 
+        # Carry YOLO trigger metadata into the postprocess payload. When set,
+        # the postprocessor will (1) pull a longer CASH_TRIGGER_CLIP_SEC clip,
+        # (2) sample N frames + run Florence batch, (3) only escalate to Gemini
+        # if cash or H2H keywords are present (or CASH_TRIGGER_H2H_ESCALATE
+        # forces through).
+        is_yolo_triggered = bool(result.get("yolo_triggered"))
+        if is_yolo_triggered:
+            event["yolo_triggered"] = True
+            event["yolo_trigger_meta"] = (result.get("metadata") or {}).get("yolo_trigger", {})
+            needs_tier2 = True  # always evaluate a YOLO-triggered cash event
+            event["gemini"]["state"] = "needed"
+
         payload = {
             "camera_id": camera_id,
             "scenario_name": scenario_name,
@@ -1454,6 +1585,7 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
             "frame": frame,
             "anchor_mono_ts": time.monotonic(),
             "needs_tier2": bool(needs_tier2),
+            "yolo_triggered": is_yolo_triggered,
         }
         queued = _queue_detection_postprocess(payload)
         if queued:
@@ -1492,6 +1624,60 @@ def _run_inference_once(camera_id: str, frame: Any, state: dict[str, Any], start
     state["last_inference_finished_at"] = time.time()
 
 
+def _florence_multi_frame_gate(
+    val_entries: list[dict[str, Any]],
+    florence_adapter: Any,
+    n_frames: int,
+) -> tuple[bool, list[str], str]:
+    """
+    Sample n_frames from the clip, run Florence caption on each, and return
+    (has_cash_or_h2h_signal, captions_list, combined_keywords_str).
+
+    Used as a lightweight filter in front of Gemini for YOLO-triggered cash
+    events so motion-only triggers that carry no cash/H2H signal don't waste
+    Gemini API calls.
+    """
+    from model_server.scenarios.base_scenario import CaptionAnalyzer
+    from model_server.scenarios import ScenarioType
+
+    if not val_entries or florence_adapter is None or not n_frames:
+        return False, [], ""
+
+    sampled = _sample_entries(val_entries, max(1, int(n_frames)))
+    captions: list[str] = []
+    any_cash_signal = False
+    any_h2h_signal = False
+    all_keywords: set[str] = set()
+
+    for entry in sampled:
+        frm = entry.get("frame")
+        if frm is None:
+            continue
+        try:
+            cap = florence_adapter.infer(frm, "")
+        except Exception as exc:
+            logger.debug("[YOLO gate] Florence sample error: %s", exc)
+            continue
+        if not cap:
+            continue
+        captions.append(cap)
+        analysis = CaptionAnalyzer.analyze(cap, ScenarioType.CASH)
+        if analysis.get("is_detected"):
+            any_h2h_signal = True
+        kws = analysis.get("matched_keywords") or []
+        for kw in kws:
+            all_keywords.add(str(kw))
+        # Treat direct cash vocabulary as the strongest signal.
+        low = cap.lower()
+        for token in ("cash", "money", "banknote", "banknotes", "paying", "paper money",
+                      "won ", "currency"):
+            if token in low:
+                any_cash_signal = True
+                break
+
+    return (any_cash_signal or any_h2h_signal), captions, ", ".join(sorted(all_keywords))
+
+
 def _process_detection_event(payload: dict[str, Any]) -> None:
     srv = _get_server_modules()
     camera_id = str(payload.get("camera_id", "")).strip()
@@ -1501,6 +1687,7 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
     frame = payload.get("frame")
     anchor_mono_ts = payload.get("anchor_mono_ts")
     needs_tier2 = bool(payload.get("needs_tier2"))
+    yolo_triggered = bool(payload.get("yolo_triggered"))
     state = _get_or_create_state(camera_id)
 
     if not event or not camera_id or not scenario_name:
@@ -1531,7 +1718,12 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
             try:
                 _tier2_validation_slots.acquire()
                 try:
-                    val_seconds = float(state.get("validation_clip_sec", 10))
+                    # YOLO-triggered cash events use CASH_TRIGGER_CLIP_SEC for a
+                    # longer clip that captures the customer approach + exchange.
+                    if yolo_triggered and scenario_name == "cash":
+                        val_seconds = float(getattr(server_config, "CASH_TRIGGER_CLIP_SEC", 14))
+                    else:
+                        val_seconds = float(state.get("validation_clip_sec", 10))
                     val_entries = (
                         srv.stream_manager.get_clip_frames(
                             camera_id,
@@ -1558,6 +1750,48 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
                                 allow_s3=False,
                                 overlay_polygons=overlay_polygons or None,
                             )
+
+                    # ── YOLO trigger → Florence multi-frame keyword gate ──
+                    # Decide if this clip shows cash-related activity before
+                    # spending a Gemini call on it.
+                    florence_gate_pass = True
+                    if yolo_triggered and scenario_name == "cash":
+                        n_sample = int(getattr(server_config, "CASH_TRIGGER_FLORENCE_FRAMES", 6))
+                        has_signal, fl_caps, fl_kws = _florence_multi_frame_gate(
+                            val_entries, getattr(srv, "florence_adapter", None), n_sample,
+                        )
+                        allow_motion_only = bool(getattr(server_config, "CASH_TRIGGER_H2H_ESCALATE", True))
+                        florence_gate_pass = bool(has_signal or allow_motion_only)
+                        event["florence_multi_frame"] = {
+                            "n_frames": len(fl_caps),
+                            "has_signal": has_signal,
+                            "matched_keywords": fl_kws,
+                            "captions_preview": [c[:200] for c in fl_caps[:3]],
+                            "gate_pass": florence_gate_pass,
+                            "reason": "signal_found" if has_signal else (
+                                "motion_only_escalation" if allow_motion_only else "no_signal_skip"
+                            ),
+                        }
+                        logger.info(
+                            "[YOLO→Florence gate] %s event=%s n=%d has_signal=%s gate_pass=%s reason=%s kws='%s'",
+                            camera_id, event.get("event_id"), len(fl_caps),
+                            has_signal, florence_gate_pass,
+                            event["florence_multi_frame"]["reason"], fl_kws[:80],
+                        )
+                        if not florence_gate_pass:
+                            # Skip Gemini, mark as rejected by florence gate.
+                            event["gemini"] = {
+                                "state": "skipped",
+                                "validated": False,
+                                "confidence": 0.0,
+                                "reason": "yolo_trigger_no_florence_signal",
+                                "at": datetime.now().isoformat(),
+                            }
+                            event["is_detected"] = False
+                            event["rejected_by_florence_gate"] = True
+                            _persist_event(camera_id, event)
+                            # release semaphore via finally below; return early after cleanup
+                            raise StopIteration("florence_gate_skip")
 
                     validation_packet = _build_validation_packet(
                         camera_id,
@@ -1606,6 +1840,15 @@ def _process_detection_event(payload: dict[str, Any]) -> None:
                     )
                     event["is_detected"] = False
                     event["rejected_by_gemini"] = True
+            except StopIteration:
+                # Florence multi-frame gate rejected the YOLO trigger (no cash/H2H
+                # signal in sampled captions). We still proceed to persist the
+                # event with gemini=skipped and save the permanent clip so the
+                # operator can inspect rejected triggers in the UI.
+                logger.info(
+                    "[VLM API] YOLO trigger rejected by Florence gate (%s): event=%s",
+                    camera_id, event.get("event_id"),
+                )
             except Exception as gem_err:
                 postprocess_ok = False
                 logger.warning("[VLM API] Gemini validation error (%s): %s", camera_id, gem_err)

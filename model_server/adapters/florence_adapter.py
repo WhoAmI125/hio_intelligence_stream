@@ -10,12 +10,27 @@ Reference:
 """
 
 import os
+import queue
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import numpy as np
 
 from .base_adapter import BaseVLMAdapter, VLMInferenceResult
+
+
+class _BatchRequest:
+    __slots__ = ("image", "task", "text_input", "kwargs", "event", "result", "error")
+
+    def __init__(self, image, task, text_input, kwargs):
+        self.image = image
+        self.task = task
+        self.text_input = text_input
+        self.kwargs = kwargs
+        self.event = threading.Event()
+        self.result = None
+        self.error = None
 
 
 class FlorenceAdapter(BaseVLMAdapter):
@@ -69,6 +84,54 @@ class FlorenceAdapter(BaseVLMAdapter):
         }
         self.caption_task = task_map.get(detail, '<MORE_DETAILED_CAPTION>')
         self.num_beams = max(1, int(self.config.get('num_beams', 3)))
+
+        # Micro-batcher (opt-in via FLORENCE_BATCH_SIZE)
+        self._batch_size = max(1, int(os.getenv('FLORENCE_BATCH_SIZE', '1')))
+        self._batch_wait_ms = max(0, int(os.getenv('FLORENCE_BATCH_WAIT_MS', '40')))
+        self._batch_queue: "queue.Queue[_BatchRequest]" = queue.Queue()
+        self._batch_thread: Optional[threading.Thread] = None
+        self._batch_shutdown = threading.Event()
+
+    def _batch_loop(self) -> None:
+        """Background thread that coalesces concurrent infer() calls into batches."""
+        wait_s = self._batch_wait_ms / 1000.0
+        while not self._batch_shutdown.is_set():
+            try:
+                first = self._batch_queue.get(timeout=0.5)
+            except queue.Empty:
+                continue
+            batch: List[_BatchRequest] = [first]
+            if self._batch_size > 1 and wait_s > 0:
+                deadline = time.monotonic() + wait_s
+                while len(batch) < self._batch_size:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    try:
+                        batch.append(self._batch_queue.get(timeout=remaining))
+                    except queue.Empty:
+                        break
+            try:
+                results = self._run_task_batch(batch)
+                for req, res in zip(batch, results):
+                    req.result = res
+                    req.event.set()
+            except Exception as exc:  # pragma: no cover - runtime safety
+                for req in batch:
+                    req.error = exc
+                    req.event.set()
+
+    def _start_batcher(self) -> None:
+        if self._batch_size <= 1:
+            return
+        if self._batch_thread and self._batch_thread.is_alive():
+            return
+        self._batch_shutdown.clear()
+        self._batch_thread = threading.Thread(
+            target=self._batch_loop, name='florence-batcher', daemon=True
+        )
+        self._batch_thread.start()
+        print(f"[FlorenceAdapter] micro-batcher started (size={self._batch_size}, wait={self._batch_wait_ms}ms)")
 
     def initialize(self) -> bool:
         """
@@ -226,6 +289,18 @@ class FlorenceAdapter(BaseVLMAdapter):
                 torch.set_num_threads(min(cpu_count, 4))
                 print(f"[FlorenceAdapter] Using {torch.get_num_threads()} CPU threads")
 
+            # torch.compile for 20-40% faster inference (one-time ~30-60s warmup cost).
+            # Opt-out with FLORENCE_COMPILE=0 in .env.
+            if use_cuda and os.getenv('FLORENCE_COMPILE', '1') != '0':
+                try:
+                    self.model = torch.compile(self.model, mode="reduce-overhead")
+                    print("[FlorenceAdapter] torch.compile enabled (mode=reduce-overhead)")
+                except Exception as exc:
+                    print(f"[FlorenceAdapter] torch.compile skipped: {exc}")
+
+            # Start micro-batcher if enabled
+            self._start_batcher()
+
             print(f"[FlorenceAdapter] PyTorch model loaded on {self.device}")
             return True
 
@@ -310,9 +385,111 @@ class FlorenceAdapter(BaseVLMAdapter):
         # For now, fall back to PyTorch
         return self._infer_pytorch(image, prompt, **kwargs)
 
+    def _run_task_batch(self, requests: List[_BatchRequest]) -> List[dict]:
+        """
+        Batched Florence-2 forward pass. Keeps greedy beams=1 for deterministic output.
+        Assumes all requests share the same task token (validated below).
+        Falls back to per-request single inference if tasks differ.
+        """
+        import torch
+        from PIL import Image
+
+        if not requests:
+            return []
+
+        # If heterogeneous tasks in batch, fall back to per-request (rare in this repo).
+        first_task = requests[0].task
+        heterogeneous = any(r.task != first_task or r.text_input for r in requests[1:])
+        if heterogeneous or len(requests) == 1:
+            return [self._run_task_single(r.image, r.task, r.text_input, **r.kwargs) for r in requests]
+
+        pil_images = [Image.fromarray(self.preprocess_image(r.image)) for r in requests]
+        prompts = [first_task] * len(requests)
+
+        inputs = self.processor(
+            text=prompts,
+            images=pil_images,
+            return_tensors="pt",
+            padding=True,
+        )
+        device = next(self.model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        max_new_tokens = int(requests[0].kwargs.get('max_new_tokens', self.max_tokens))
+        num_beams = int(requests[0].kwargs.get('num_beams', self.num_beams))
+        if num_beams < 1:
+            num_beams = 1
+
+        autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.float16) if device.type == 'cuda' else None
+        with torch.inference_mode():
+            if autocast_ctx:
+                with autocast_ctx:
+                    generated_ids = self.model.generate(
+                        **inputs,
+                        max_new_tokens=max_new_tokens,
+                        num_beams=num_beams,
+                        do_sample=False,
+                    )
+            else:
+                generated_ids = self.model.generate(
+                    **inputs,
+                    max_new_tokens=max_new_tokens,
+                    num_beams=num_beams,
+                    do_sample=False,
+                )
+
+        generated_texts = self.processor.batch_decode(generated_ids, skip_special_tokens=False)
+        results: List[dict] = []
+        for text, pil in zip(generated_texts, pil_images):
+            parsed = self.processor.post_process_generation(
+                text, task=first_task, image_size=(pil.width, pil.height)
+            )
+            results.append(parsed)
+        return results
+
+    def _run_task_single(self, image: np.ndarray, task: str, text_input: Optional[str] = None, **kwargs) -> dict:
+        """Original single-image path. Preserved for heterogeneous-task fallback."""
+        import torch
+        from PIL import Image
+
+        image_rgb = self.preprocess_image(image)
+        pil_image = Image.fromarray(image_rgb)
+        prompt = f"{task}{text_input}" if text_input else task
+
+        inputs = self.processor(text=prompt, images=pil_image, return_tensors="pt")
+        device = next(self.model.parameters()).device
+        inputs = {k: v.to(device) for k, v in inputs.items()}
+
+        max_new_tokens = kwargs.get('max_new_tokens', self.max_tokens)
+        num_beams = int(kwargs.get('num_beams', self.num_beams))
+        if num_beams < 1:
+            num_beams = 1
+
+        autocast_ctx = torch.autocast(device_type='cuda', dtype=torch.float16) if device.type == 'cuda' else None
+        with torch.inference_mode():
+            if autocast_ctx:
+                with autocast_ctx:
+                    generated_ids = self.model.generate(
+                        **inputs, max_new_tokens=max_new_tokens,
+                        num_beams=num_beams, do_sample=False,
+                    )
+            else:
+                generated_ids = self.model.generate(
+                    **inputs, max_new_tokens=max_new_tokens,
+                    num_beams=num_beams, do_sample=False,
+                )
+        generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
+        return self.processor.post_process_generation(
+            generated_text, task=task, image_size=(pil_image.width, pil_image.height)
+        )
+
     def _run_task(self, image: np.ndarray, task: str, text_input: str = None, **kwargs) -> dict:
         """
         Run a Florence-2 task.
+
+        If FLORENCE_BATCH_SIZE > 1, concurrent calls are coalesced by the background
+        batcher into a single forward pass. Callers are blocked until their result
+        is ready (typical wait: up to FLORENCE_BATCH_WAIT_MS).
 
         Florence-2 uses fixed task tokens, not free-form prompts.
         Supported tasks:
@@ -321,16 +498,15 @@ class FlorenceAdapter(BaseVLMAdapter):
             <OCR>, <OCR_WITH_REGION>
             <CAPTION_TO_PHRASE_GROUNDING> (+ text_input)
             <OPEN_VOCABULARY_DETECTION> (+ text_input, large model only)
-
-        Args:
-            image: BGR image from OpenCV
-            task: Task token string
-            text_input: Optional text input for grounding tasks
-            **kwargs: Generation parameters
-
-        Returns:
-            Parsed result dict from Florence-2 post-processing
         """
+        if self._batch_size > 1 and self._batch_thread and self._batch_thread.is_alive() and not text_input:
+            req = _BatchRequest(image, task, text_input, kwargs)
+            self._batch_queue.put(req)
+            req.event.wait()
+            if req.error:
+                raise req.error
+            return req.result
+
         import torch
         from PIL import Image
 

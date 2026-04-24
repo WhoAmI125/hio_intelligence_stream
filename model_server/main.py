@@ -64,6 +64,8 @@ rule_updater: RuleUpdater | None = None
 data_collector: DataCollector | None = None
 inference_scheduler = None
 event_postprocessor = None
+yolo_pose_adapter = None                    # YoloPoseAdapter instance (cash gate)
+cashier_trackers: dict[str, Any] = {}       # per camera_id → CashierTracker
 ws_clients: list[WebSocket] = []
 is_shutting_down: bool = False
 startup_restore_task: asyncio.Task[Any] | None = None
@@ -326,6 +328,7 @@ async def lifespan(app: FastAPI):
     global stream_manager, local_storage, flush_worker
     global florence_adapter, gemini_validator, pipeline_orchestrator, evidence_router, agents
     global critic_trainer, rule_updater, data_collector, inference_scheduler, event_postprocessor
+    global yolo_pose_adapter
     global is_shutting_down, startup_restore_task
 
     logger.info("=" * 60)
@@ -418,6 +421,30 @@ async def lifespan(app: FastAPI):
         logger.warning(f"Florence-2 / Orchestrator not loaded (will work without GPU): {e}")
         florence_adapter = None
         pipeline_orchestrator = None
+
+    # YOLO pose adapter for cash trigger gate (optional)
+    if config.YOLO_POSE_ENABLED:
+        try:
+            from model_server.adapters.yolo_pose_adapter import YoloPoseAdapter
+            yolo_pose_adapter = YoloPoseAdapter(
+                model_path=config.YOLO_POSE_MODEL,
+                device=config.YOLO_POSE_DEVICE,
+                conf_threshold=config.YOLO_POSE_CONFIDENCE,
+                input_size=config.YOLO_POSE_INPUT_SIZE,
+            )
+            if yolo_pose_adapter.initialize():
+                logger.info(
+                    "YOLO-pose cash gate loaded: %s (device=%s, conf=%.2f)",
+                    config.YOLO_POSE_MODEL, yolo_pose_adapter.device, config.YOLO_POSE_CONFIDENCE,
+                )
+            else:
+                logger.warning("YOLO-pose adapter initialize() returned False; cash gate disabled")
+                yolo_pose_adapter = None
+        except Exception as exc:
+            logger.warning("YOLO-pose adapter load failed: %s", exc)
+            yolo_pose_adapter = None
+    else:
+        logger.info("YOLO-pose cash gate disabled (YOLO_POSE_ENABLED=false).")
 
     # Determine router configurations
     try:

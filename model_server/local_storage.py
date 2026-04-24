@@ -171,7 +171,7 @@ class LocalStorage:
         self.flushed_dates_dir = self.flush_state_dir / "flushed_dates"
         self.local_retention_days = max(
             1,
-            int(getattr(config, "LOCAL_RETENTION_DAYS", 3) or 3),
+            int(getattr(config, "LOCAL_RETENTION_DAYS", 5) or 5),
         )
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.clips_dir.mkdir(parents=True, exist_ok=True)
@@ -196,6 +196,37 @@ class LocalStorage:
                     dates.add(day_dir.name)
         return sorted(dates)
 
+    def _event_ids_with_human_feedback(self, date_str: str) -> set[str]:
+        """
+        Scan events/{date_str}/*.json and return event_ids whose JSON contains
+        non-empty human_feedback (canonical GT from /monitor/labeling).
+
+        Labeled events are protected from retention cleanup — we keep their JSON
+        plus associated clip and thumbnail files indefinitely.
+        """
+        protected: set[str] = set()
+        day_events = self.events_dir / date_str
+        if not day_events.exists():
+            return protected
+        for fp in day_events.glob("*.json"):
+            try:
+                data = json.loads(fp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            fb = data.get("human_feedback")
+            if not fb:
+                continue
+            # Accept dict with decision, or non-empty string, or truthy value.
+            if isinstance(fb, dict):
+                decision = str(fb.get("decision") or "").strip().lower()
+                if decision in {"accept", "decline", "unsure", "tp", "fp", "unclear"}:
+                    protected.add(fp.stem)
+            elif isinstance(fb, str) and fb.strip():
+                protected.add(fp.stem)
+            elif fb:
+                protected.add(fp.stem)
+        return protected
+
     def _cleanup_old_local_dates(self) -> None:
         all_dates = self._all_local_dates()
         if len(all_dates) <= self.local_retention_days:
@@ -206,20 +237,65 @@ class LocalStorage:
             if date_str in keep_dates or not self._is_flushed_date(date_str):
                 continue
 
+            protected_ids = self._event_ids_with_human_feedback(date_str)
+
+            if not protected_ids:
+                # No labeled events — safe to remove the whole day directory.
+                for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
+                    day_dir = base / date_str
+                    if day_dir.exists():
+                        shutil.rmtree(day_dir, ignore_errors=True)
+                marker = self._flushed_marker_path(date_str)
+                if marker.exists():
+                    marker.unlink()
+                logger.info(
+                    "[LocalStorage] Removed local data for %s after retention window (%s days)",
+                    date_str,
+                    self.local_retention_days,
+                )
+                continue
+
+            # Selective cleanup: preserve files whose names start with a protected
+            # event_id (covers {eid}.json, {eid}.mp4, {eid}_roi.mp4, val_{eid}.mp4,
+            # {eid}.jpg, etc.).
+            protected_prefixes = set()
+            for eid in protected_ids:
+                protected_prefixes.add(eid)
+                protected_prefixes.add(f"val_{eid}")
+
+            kept, removed = 0, 0
             for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
                 day_dir = base / date_str
-                if day_dir.exists():
-                    shutil.rmtree(day_dir, ignore_errors=True)
-
-            marker = self._flushed_marker_path(date_str)
-            if marker.exists():
-                marker.unlink()
+                if not day_dir.exists():
+                    continue
+                for entry in list(day_dir.iterdir()):
+                    if any(entry.name.startswith(p) for p in protected_prefixes):
+                        kept += 1
+                        continue
+                    try:
+                        if entry.is_file() or entry.is_symlink():
+                            entry.unlink()
+                        elif entry.is_dir():
+                            shutil.rmtree(entry, ignore_errors=True)
+                        removed += 1
+                    except OSError as exc:
+                        logger.debug(
+                            "[LocalStorage] Retention cleanup skipped %s: %s",
+                            entry, exc,
+                        )
+                # If the day dir is empty after selective cleanup, drop it.
+                try:
+                    if not any(day_dir.iterdir()):
+                        day_dir.rmdir()
+                except OSError:
+                    pass
 
             logger.info(
-                "[LocalStorage] Removed local data for %s after retention window (%s days)",
-                date_str,
-                self.local_retention_days,
+                "[LocalStorage] Retention cleanup for %s: kept %d labeled-event files, "
+                "removed %d unlabeled files (labeled event_ids=%d)",
+                date_str, kept, removed, len(protected_ids),
             )
+            # Keep the flushed marker so we don't re-process this date.
 
     # ------------------------------------------------------------------
     # Events

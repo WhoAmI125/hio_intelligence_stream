@@ -1,62 +1,212 @@
-# Secrets
+# =============================================================================
+# Secrets & credentials
+# =============================================================================
 .env
 .env.*
 !.env.example
 !.env.aws
 *.pem
 *.key
+*.crt
+*.p12
+*.pfx
+*.cer
+*.keystore
+*.jks
+credentials.json
+service-account*.json
+*secret*.yaml
+*secret*.yml
+*.htpasswd
 
+# =============================================================================
 # Python
+# =============================================================================
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
+*.egg
+*.egg-info/
+.eggs/
+build/
+dist/
+wheels/
+*.whl
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
+.pyre/
+.pytype/
 .coverage*
 htmlcov/
+.ipynb_checkpoints/
+*.ipynb_backup
+.tox/
+.nox/
 
+# =============================================================================
 # Virtual environments
+# =============================================================================
 venv/
 .venv/
 env/
+ENV/
+.conda/
 
-# Runtime data and local artifacts
+# =============================================================================
+# Node / JS (frontend 서브 프로젝트가 생길 경우 대비)
+# =============================================================================
+node_modules/
+.pnp/
+.pnp.js
+.next/
+.nuxt/
+.cache/
+.parcel-cache/
+dist-ssr/
+
+# =============================================================================
+# Runtime data & local artifacts (HiO 파이프라인 출력)
+# =============================================================================
 data/
 _tests_archive/
 tmp_*/
 tmp*/
 test_data_tier2/
 scratch/
+outputs/
+output/
+exports/
+export/
+captures/
+recordings/
+snapshots/
+screenshots/
+dumps/
+eval_output*/
+gt_output*/
+runs/
+wandb/
+mlruns/
 *.db
-*.sqlite*
+*.sqlite
+*.sqlite3
+*.db-journal
 *.log
+*.log.*
 *.jsonl
+*.ndjson
 
-# Media outputs
+# =============================================================================
+# Media — 클립/영상/이미지/오디오 전부 차단 (프레임·ROI·GT 포함)
+# =============================================================================
+clips/
+clip_*/
+*_clip*
+roi_*/
+frames/
+frame_*/
+# video
 *.mp4
 *.avi
+*.mov
+*.mkv
+*.webm
+*.flv
+*.wmv
+*.m4v
+*.mpg
+*.mpeg
+*.ts
+# image
 *.jpg
 *.jpeg
 *.png
+*.gif
+*.bmp
+*.tif
+*.tiff
+*.webp
+*.heic
+*.heif
+*.raw
+# audio
+*.wav
+*.mp3
+*.flac
+*.aac
+*.ogg
+*.m4a
 
-# Model/cache artifacts
+# =============================================================================
+# Datasets / binary arrays / archives
+# =============================================================================
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.parquet
+*.feather
+*.arrow
+*.msgpack
+*.joblib
+*.pkl
+*.pickle
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.tar.bz2
+*.tbz2
+*.tar.xz
+*.txz
+*.7z
+*.rar
+*.gz
+*.bz2
+*.xz
+
+# =============================================================================
+# Model / cache artifacts
+# =============================================================================
 models/
 model_cache/
+.cache/
+hf_cache/
+huggingface/
+torch_cache/
 *.pt
+*.pth
 *.bin
 *.onnx
 *.ckpt
 *.safetensors
+*.tflite
+*.pb
+*.gguf
+*.ggml
 
-# Local test output noise
+# =============================================================================
+# Local test / scratch output noise
+# =============================================================================
 test_out*.txt
 test_*results*.txt
 out*.txt
+*.bak
+*.backup
+*.orig
+*.swp
+*.swo
+*~
+.resolved
+*.resolved
 
+# =============================================================================
 # Editors / OS
+# =============================================================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+desktop.ini
