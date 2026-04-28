@@ -4,20 +4,29 @@
 .env
 .env.*
 !.env.example
-!.env.aws
 *.pem
 *.key
 *.crt
 *.p12
 *.pfx
 *.cer
+*.csr
+*.pub
 *.keystore
 *.jks
+id_rsa*
+id_ed25519*
 credentials.json
+credentials.*
+secrets.*
 service-account*.json
+*service_account*.json
+aws-credentials*
 *secret*.yaml
 *secret*.yml
 *.htpasswd
+.aws/
+.gcloud/
 
 # =============================================================================
 # Python
@@ -70,7 +79,13 @@ dist-ssr/
 # Runtime data & local artifacts (HiO 파이프라인 출력)
 # =============================================================================
 data/
+logs/
+analysis_frames/
+media/
+thumbnails/
+events/
 _tests_archive/
+tmp/
 tmp_*/
 tmp*/
 test_data_tier2/
@@ -175,11 +190,16 @@ model_cache/
 .cache/
 hf_cache/
 huggingface/
+.huggingface/
 torch_cache/
+.torch/
 *.pt
 *.pth
 *.bin
 *.onnx
+*.engine
+*.trt
+*.plan
 *.ckpt
 *.safetensors
 *.tflite
