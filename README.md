@@ -1,1697 +1,1137 @@
-# HiO Intelligence Stream — 실시간 CCTV 이상 탐지 시스템
+# HIO Intelligence Stream v3
 
-> Florence-2 (Tier-1, On-Device GPU) + Gemini (Tier-2, Cloud API) + 인간 라벨링 기반 GT 수집 파이프라인
-> **3-서버 마이크로서비스 · 실시간 RTSP 분석 · g4dn.2xlarge 1대로 멀티 카메라 운영**
+호텔 CCTV에서 `cash`, `fire`, `violence` 3개 시나리오를 감지하고, Gemini가 원본 full-frame 영상과 1개 overlay 영상을 보고 최종 검증하는 v3 런타임입니다.
 
----
+최신 반영일: **2026-04-29** — cash exchange-band proposal + full-clip SigLIP2 cash aggregation + unified requirements + MJPEG 안정화 반영.
 
-## 최근 업데이트 (2026-04-17 ~ 현재)
+주요 변경 요약:
 
-- **Florence 파라미터 재튜닝 (2026-04-18 이후)** — `FLORENCE_INPUT_SIZE=448` (이중 resize 완화), `FLORENCE_MAX_TOKENS=200` (25.9% truncation 위험 해소), `FLORENCE_CAPTION_DETAIL=more` (`<MORE_DETAILED_CAPTION>` task). 속도 위주에서 recall 위주로 전환.
-- **Shadow/Critic 런타임 경로 제거 (2026-04-17)** — 181건 기록에도 downstream 0 artifact로 Dead 확인, UI/API/설정/메뉴까지 완전 제거. `config.SHADOW_*` 4개 상수, `main.shadow_agents`, `/api/vlm/shadow/*` 라우트 2개, `/monitor/shadow`, shadow HTML 템플릿, base sidebar 메뉴, `gemini_logs.html` shadow_feedback fallback 모두 정리.
-- **Labeling UI 재설계** (`/monitor/labeling`) — 블로킹 `prompt()` 제거, 웰컴 카드 + 좌측 이벤트 리스트 패널(직접 선택) + 한국어 UI + TP/FP/Unclear 기준 가이드 + 단축키 힌트 패널 상시 노출.
-- **`display_name` 카메라 라벨 편집** — `camera_id`(내부 식별자, 파일명·이벤트 ID·DB 키에 박힘) 고정, `display_name`만 UI에서 편집 가능. idempotent `ALTER TABLE cameras ADD COLUMN display_name` 마이그레이션 내장.
-- **TP 이벤트 clip race fix** (`vlm_api.py`) — validation clip 디스크 유지, 영구 clip 생성 시 `val_entries` 재사용으로 ring buffer evict 경합 제거, `clip_duration_sec` → `validation_clip_sec` 통일. TP 50% clip 유실 문제 해결. `finally` fallback으로 영구 clip 실패 시 `val_clip_path` 자동 승계.
-- **Gemini 로그 미디어 strip 통일** — `clip | ROI | gemini` 3열 고정 (fire/violence도 overlay 없을 때 plain/thumbnail fallback하되 라벨은 불변).
-- **Florence 튜닝 실측 번들** — 1000 캡션 분석 결과 cash 어휘 실측 **0.00%**, latency p50 **1002ms**, 이중 resize 경로 확인. `matched_keywords` 186/186 빈 배열. 트리거 실체는 `holding` 100% + `desk` 79% + `bank` 20% soft-score 누적. 상세: `scratch/tuning_bundle_20260417.tar.gz`
+- **Cash 후보 로직 재구성** — `cashier_zone` 안 손목만으로는 emit 금지. `exchange_band` 근처 손목/움직임/crossing/proximity와 5초 rolling window 내 2회 hit를 cash 후보 기준으로 사용.
+- **`exchange_band`, `staff_work_zone` 연결** — DB, model API, frontend zone editor, auto-restore, event metadata, candidate overlay, Gemini packet까지 연결. `exchange_band`는 선이 아니라 얇은 polygon band로 3점 이상 필요.
+- **Cash full-clip SigLIP2 aggregation 추가** — hard pass 전이라도 cash `soft_hit`이 안정적으로 잡히면 최근 15초 clip에서 12 full-frame을 샘플링하고 `google/siglip2-base-patch16-224`로 cash score를 집계해 후보를 승격.
+- **requirements 단일화** — `requirements.txt` 하나에 CUDA torch/cu121 + runtime dependency를 고정. `requirements_gpu.txt`는 호환용 shim으로 `requirements.txt`만 참조.
+- **MJPEG preview 안정화** — 로컬 full-res 15fps preview를 제거하고 `3fps base / 12fps burst / width 854 / quality 55`로 통일. dedup heartbeat가 동일 프레임 장기 유지 시 브라우저 스트림을 굶기지 않도록 수정.
+- **Tier-2에 fine-tuned SigLIP2 분류기 2개 추가** — `Fire-Detection-Siglip2` (99.4% acc 3-class), `Human-Action-Recognition` (fighting F1 0.84, 15-class, 14 neutral class 내장). 둘 다 Apache 2.0 오픈 웨이트.
+- **YOLO26 generic detect 드롭** — COCO class에 한국 원화·weapon class가 없어 실측 기여 0. `YOLO26_DETECT_WEIGHTS=""`가 기본.
+- **8 vCPU 스팟 대응 안정화** — 720p ingest 다운샘플, FFmpeg `ultrafast` / `crf 23` (+ `FFMPEG_ENCODER=h264_nvenc` 옵션), overlay fps `/1`, MJPEG stable preview (`3fps`, width `854`, dedup heartbeat), uvicorn 1 worker, NVDEC `h264_cuvid` 명시.
+- **Episode 1-per-emission 재의미** — 조건 지속 시 같은 episode = 1회만 emit. "20초 metronome" 문제 해소. `max_gap_sec=6` 이상 non-detected 프레임 후 새 episode.
+- **Classifier permanent_failure 감지** — 8회 연속 load 실패 시 ERROR 로그 + `/api/vlm/config/`의 `*.permanent_failure=true`로 운영자 알림.
+- **SigLIP health runtime 노출** — `/api/vlm/config/`에 `semantic_filter / fire_classifier / action_classifier` 각각 `loaded`, `failure_count`, `last_error`, `permanent_failure` 필드.
+- **FlushWorker lock + today-skip** — 동시 flush race 방지, `archive_date(today)` 스킵으로 같은 날 재시작 데이터 보존.
+- **Labeling FP subtype 강제** — 7종 (phone/receipt/card/empty_scene/staff_only/no_transfer/other) UI + 서버 validation. 키보드 Q/W/E/R/T/Y/U (FP 모드 시만 활성).
+- **스팟 인터럽션 대응** — `FLUSH_INTERVAL_SEC=120` + `tools/spot_interruption_watcher.py` (pre-stop `/flush-now/` POST) + systemd units (`deploy/`).
+- Multi-head 공유 backbone 학습 계획은 `docs/FUTURE_MULTIHEAD_SIGLIP_PLAN.md`에 보관 (현재 배포 미포함).
 
-> **현재 강화 방향**: Gemini는 hard-gate v.26.04.17로 잘 기능(총 186건 중 accept 약 1%). Florence의 Tier-1 스크리너 역할과 GT 라벨 수집이 병목. **Motion gating + GT 수집**이 다음 우선순위. LoRA는 GT 1/186으로 데이터 부족해 비활성 유지.
-
----
-
-## 목차
-
-1. [프로젝트 개요](#프로젝트-개요)
-2. [전체 파일 구조](#전체-파일-구조)
-3. [현재 아키텍처](#현재-아키텍처)
-4. [아키텍처 다이어그램](#아키텍처-다이어그램)
-5. [모델 아키텍처 상세](#모델-아키텍처-상세)
-6. [추론 파이프라인 흐름](#추론-파이프라인-흐름)
-7. [GPU/CPU 리소스 실측](#gpucpu-리소스-실측)
-8. [핵심 컴포넌트](#핵심-컴포넌트)
-9. [Labeling UI (GT 수집)](#labeling-ui-gt-수집)
-10. [UI 구성](#ui-구성)
-11. [데이터베이스 스키마](#데이터베이스-스키마)
-12. [데이터 저장 구조](#데이터-저장-구조)
-13. [API 요약](#api-요약)
-14. [환경 변수](#환경-변수)
-15. [배포 구조](#배포-구조)
-16. [로컬 실행](#로컬-실행)
-17. [코드 규모](#코드-규모-2026-04-21-실측)
-18. [트러블슈팅](#트러블슈팅)
-19. [이벤트 생명주기 (End-to-End Trace)](#이벤트-생명주기-end-to-end-trace)
-20. [실측 기반 한계와 다음 단계](#실측-기반-한계와-다음-단계)
-21. [Repo Hygiene](#repo-hygiene)
-22. [로컬 개발 상세 가이드](#로컬-개발-상세-가이드)
-
----
-
-## 프로젝트 개요
-
-RTSP CCTV 스트림을 실시간으로 분석하여 3개 시나리오를 탐지합니다:
-
-- `cash` — 현금 거래/금전 전달
-- `fire` — 화재/연기
-- `violence` — 폭력/충돌
-
-### 2-Tier 설계
-
-| Tier | 역할 | 모델 | 비용 |
-|------|-----|------|------|
-| Tier-1 | 고속 스크리닝 (장면 캡션 → 키워드 soft score) | **Florence-2-large 단일** (PyTorch fp16, CUDA autocast) | 추론당 p50 1848ms/1299ms (T4, 448px, tok=200, `<MORE_DETAILED_CAPTION>`, beams=1) |
-| Tier-2 | 경계선 케이스 최종 판정 (Korean-aware hard/soft rules) | **Gemini 3.1 Flash Lite Preview 단일** (Cloud API) | API 호출당 ~$0.001, video_only 모드 p50 ~4-6s |
-
-> **중요**: Tier-1은 **Florence-2만** 사용. YOLO/YOLO-pose/CLIP/MediaPipe/Grounding DINO/Qwen-VL 등은 **현재 코드베이스에 import/호출 0건**. `other_v2/` 설계 문서의 3-Tier 계획(YOLO26s-Pose + CLIP + Qwen2.5-VL-3B)은 **미실현 프로토타입**이며 본 저장소와 무관합니다. 자세한 내역은 [현재 구현되어 있지 않은 것](#현재-구현되어-있지-않은-것-오해-방지) 섹션 참조.
-
-### 핵심 설계 원칙
-
-- **Caption Sharing**: 프레임당 Florence-2 추론 1회 → 자유 캡션 텍스트를 3개 시나리오(`CaptionAnalyzer.analyze()`)가 CPU regex로 공유 분석. GPU round-trip 3→1 감소.
-- **Word-boundary regex matching**: `re.compile(r'\b{kw}\b', re.IGNORECASE)` 패턴을 전역 캐시(`_compiled_patterns`)에 lazy 컴파일. substring 오탐(`billboard`가 `bill`로 매칭되는 현상) 방지.
-- **4-layer scoring**: `strong_positive` × 0.3 + `moderate_positive` × 0.1 + `context_phrases` × 0.15 + `negative` × -0.3 → clamp(0, 1). 시나리오별 weight 미세 조정(violence strong 0.35 / fire strong 0.4).
-- **Neutralizing phrases**: "fire extinguisher"는 `fire` strong 신호를 무효화 (mask-then-search 2-pass). cash의 경우 "cash"는 "cash register" 안에 있을 때만 neutralize, `cash register` 자체는 강한 신호로 보존.
-- **H2H fallback detection**: `strong_positive` 매치가 0이어도 `LOCATION {counter, cashier, checkout, front desk, reception, drawer, bank, teller, store, lobby} ∩ ACTION {handing, holding, passing, reaching, exchanging, giving, receiving, placing, picking}`이 동시에 매칭되면 `is_detected=True` 승격. cash 이벤트의 대부분이 이 경로.
-- **Escalation by threshold**: Tier-1 confidence `< TIER2_CASH_THRESHOLD(0.55)` 이면 `evidence_router.py:1126` `force_tier2=True`로 설정되어 margin gate 무시하고 자동 `GEMINI_VIDEO`.
-- **Gemini가 cash 판정 전담**: Florence 캡션에는 cash 어휘 실측 **0.00%** (1000건/0건). Tier-1은 "사람+카운터" 같은 soft trigger만 제공, 실제 판정은 Gemini video + hard rule H1/H2/H3 + soft rule S_STRONG_1~3이 담당.
-- **인간 라벨링으로 GT 구축**: `/monitor/labeling` UI로 이벤트 단위 TP/FP/Unclear 수동 라벨링 → `event.human_feedback` JSON 필드에 canonical 저장. 후속 튜닝·A/B 측정·LoRA 품질 게이트 근거.
-- **Fail-open API 정책**: Gemini API 오류 시 `True, 1.0, "Validation disabled", event_type` 반환. 이벤트를 놓치는 것보다 overconfirm이 낫다는 판단.
-
-### 현재 운영 범위 (2026-04-17 실측)
-
-| 항목 | 값 |
-|------|-----|
-| 인스턴스 | g4dn.2xlarge 1대 (T4 15GB + Xeon 8 vCPU + 32GB RAM) |
-| 카메라 | 2대 (일산·금촌) |
-| GPU VRAM 사용 | **2,165 MiB / 15GB (14%)** — Florence-2 fp16 ~1.5GB + CUDA context + NVDEC |
-| GPU SM 활용률 | 평균 **65%** (45~83% 범위), 온도 39°C |
-| CPU | `model_server` 프로세스 144% CPU, RSS 9.2GB, system user 21%, load avg 2.13/8 |
-| RAM 사용 | 11.6 GB / 30 GB (37%) |
-| 실효 처리율 | **~1.0 fps/camera** (Florence 1002ms p50로 compute-bound) |
-| 이벤트 생성 | 하루 수십~수백 건, cash 2일치 186건 기준 |
-| Gemini 호출 | 호출당 ~4-6초, accept 비율 2/186 (~1%) |
-| 월 비용 | GPU 인스턴스 약 $400, Gemini API 수만원 |
-
----
-
-## 전체 파일 구조
-
-```
-hio_intelligence_stream/
-├── model_server/                          # Tier-1/Tier-2 추론 서버 (:8000)
-│   ├── main.py                            #   FastAPI 앱, 전체 컴포넌트 라이프사이클
-│   ├── vlm_api.py                         #   VLM API 라우터 + 추론 루프 + val_clip race fix
-│   ├── config.py                          #   환경변수 기반 중앙 설정
-│   ├── stream_manager.py                  #   멀티카메라 RTSP 리더 + ring buffer + burst FPS
-│   ├── pipeline_orchestrator.py           #   3개 시나리오 caption 공유 오케스트레이터
-│   ├── evidence_router.py                 #   Tier-2 에스컬레이션 라우터 (threshold + Q-value)
-│   ├── gemini_validator.py                #   Tier-2 Gemini Vision API 검증기
-│   ├── inference_scheduler.py             #   중앙 추론 스케줄러 (디스패처 + 워커 풀 1)
-│   ├── event_postprocessor.py             #   비동기 후처리 (클립 저장 + Gemini 호출)
-│   ├── local_storage.py                   #   이벤트 JSON/클립 MP4/썸네일 JPG 저장
-│   ├── flush_worker.py                    #   Model→DB 배치 플러시 (HTTP POST)
-│   ├── logger.py                          #   구조화 JSONL 로거
-│   ├── adapters/
-│   │   ├── base_adapter.py                #     VLM 어댑터 ABC (preprocess/crop 포함)
-│   │   └── florence_adapter.py            #     Florence-2 PyTorch 어댑터 (+LoRA 로드 지원)
-│   ├── scenarios/
-│   │   ├── base_scenario.py               #     CaptionAnalyzer (word-boundary regex 매칭)
-│   │   ├── cash_scenario.py
-│   │   ├── fire_scenario.py
-│   │   └── violence_scenario.py
-│   ├── agents/
-│   │   ├── dynamic_agent.py               #     [Dead Code] 초기화만, 호출 0
-│   │   └── prompts/                       #     cash.md / fire.md / violence.md
-│   ├── base_detector.py                   # [Dead Code] YOLO 기반 detector 구현체. 호출 경로 0
-│   ├── episode_manager.py                 # [Dead Code] import 없음, throwaway Episode만 사용
-│   ├── evolution/                         # [Dead Code — 다음 라운드 제거 예정]
-│   │   ├── critic_trainer.py              #     LightGBM 크리틱. 호출 경로 Shadow 제거로 죽음
-│   │   └── rule_updater.py                #     프롬프트 자동 진화. 실측 Auto-Added 0건
-│   └── lora/
-│       ├── data_collector.py              #     LoRA 학습 데이터 수집기 (활성)
-│       ├── dataset.py                     #     PyTorch Dataset + Collate
-│       └── train_lora.py                  #     LoRA 파인튜닝 스크립트 (오프라인)
-│
-├── db_server/                             # 이벤트 DB 서버 (:8001)
-│   ├── main.py                            #   FastAPI + SQLite WAL + cameras display_name 마이그레이션
-│   └── models.py                          #   [Legacy] Django ORM 스키마 (참조용, 미사용)
-│
-├── frontend_server/                       # 모니터링 UI + 리버스 프록시 (:8002)
-│   ├── main.py                            #   FastAPI + Jinja2 + /api/proxy/*
-│   └── templates/vlm_pipeline/
-│       ├── base_public.html               #     사이드바 레이아웃 (5개 메뉴)
-│       ├── adhoc_rtsp.html                #     CCTV Live + 설정 모달 (display_name 편집)
-│       ├── florence_logs.html             #     Florence Tier-1 추론 로그 + LoRA 피드백
-│       ├── gemini_logs.html               #     Gemini Tier-2 검증 로그 (clip | ROI | gemini)
-│       └── labeling.html                  #     GT 라벨링 UI (웰컴 + 이벤트 리스트 패널)
-│
-├── deploy/                                # AWS 배포 자동화
-│   ├── setup_aws_g4dn.sh                  #   원스텝 배포 스크립트
-│   ├── nginx.conf                         #   nginx 리버스 프록시
-│   ├── vlm-{model,db,frontend}.service    #   systemd 유닛
-│   ├── vlm-boot-recover.service           #   부팅 복구 유닛
-│   ├── vlm-safe-recover.sh                #   복구 오케스트레이션
-│   └── track_disconnect_2h.sh             #   인시던트 모니터링
-│
-├── data/                                  # 런타임 데이터 (gitignore)
-│   ├── events/YYYYMMDD/*.json             #   이벤트 JSON (canonical)
-│   ├── clips/YYYYMMDD/*.mp4               #   H.264 영구 clip (plain)
-│   ├── clips/YYYYMMDD/*_roi.mp4           #   H.264 overlay clip (cash only)
-│   ├── clips/YYYYMMDD/val_*.mp4           #   Gemini 입력 원본 (유지됨)
-│   ├── thumbnails/YYYYMMDD/*.jpg          #   썸네일
-│   ├── florence_logs/YYYYMMDD/*.jsonl     #   Florence 캡션 raw 로그
-│   ├── lora_training/                     #   LoRA 수집 데이터
-│   ├── shadow_feedback/*.jsonl            #   [Legacy] 2026-04-17 이전 기록, 유지만
-│   ├── critic_models/                     #   [Empty] 삭제 대기
-│   ├── rule_versions/                     #   [Empty] 삭제 대기
-│   └── cctv_events.db                     #   SQLite
-│
-├── models/                                # HuggingFace 캐시 (gitignore, ~1.9GB)
-│   └── hf/ + models--microsoft--Florence-2-large/
-│
-├── scratch/                               # 실험/분석 bundle (gitignore)
-│   └── tuning_bundle_*.tar.gz             #   튜닝 분석용 번들
-│
-├── .env / .env.example / .env.aws         # 환경 설정
-├── requirements.txt                       # Python 의존성 (CPU)
-├── requirements_gpu.txt                   # CUDA 12.1 PyTorch
-├── start_local.py                         # 로컬 3-서버 런처
-├── AWS_G4DN_DEPLOY_GUIDE.md
-└── VLM_INFERENCE_REFACTOR_GUIDE.md
-```
-
----
-
-## 현재 아키텍처
-
-### 3-서버 구조
-
-| 서버 | 포트 | 프로세스 | 역할 |
-|------|-----|---------|------|
-| `model_server` | `:8000` | uvicorn worker 1 | 추론, 스트림, 이벤트 생성, GPU 점유 |
-| `db_server` | `:8001` | uvicorn worker 1 | SQLite WAL, 이벤트/카메라/검증 로그 |
-| `frontend_server` | `:8002` | uvicorn worker 2 | Jinja2 UI + reverse proxy (vlm/db) |
-
-### 런타임 컴포넌트
-
-| 컴포넌트 | 역할 | GPU/CPU |
-|---------|-----|--------|
-| `StreamManager` | RTSP 리더 + ring buffer + burst FPS | CPU (OpenCV), GPU 선택 (NVDEC) |
-| `InferenceScheduler` | 중앙 디스패처, 카메라별 최신 프레임만 | CPU |
-| `FlorenceAdapter` | Tier-1 캡션 (Florence-2-large fp16) | **GPU** (CUDA) |
-| `PipelineOrchestrator` | Caption Sharing + 시나리오 분석 | GPU 1회 + CPU regex |
-| `CaptionAnalyzer` | word-boundary regex 키워드 매칭 | CPU |
-| `EvidenceRouter` | Tier-2 에스컬레이션 판단 (threshold 우선) | CPU |
-| `GeminiValidator` | Tier-2 검증 (Cloud API) | CPU (JPEG/MP4 인코딩) |
-| `EventPostProcessor` | 비동기 후처리 (clip/thumb/Gemini) | CPU (FFmpeg) |
-| `LocalStorage` | 이벤트/clip/썸네일 파일 저장 | CPU I/O |
-| `FlushWorker` | Model→DB 배치 동기화 | CPU (HTTP) |
-| `DataCollector` | LoRA 학습 데이터 수집 (passive) | CPU |
-
-### 현재 구현되어 있지 않은 것 (오해 방지)
-
-README와 저장소를 훑으면 다음 키워드가 눈에 띄지만, **모두 운영 파이프라인에 연결되어 있지 않습니다**:
-
-| 파일 / 외부 경로 | 실제 상태 | 왜 보이는가 |
-|----------------|---------|-----------|
-| `model_server/base_detector.py` (302 LoC) | **Dead Code** — `from ultralytics import YOLO`, `_load_yolo_model()`, `_yolo_to_detections()` 전부 구현돼 있음. `main.py`에서 import 0건, 호출 0건. `requirements.txt`에 `ultralytics` 없음 (이미 정리) → import 시 ModuleNotFoundError | 과거 YOLO 기반 Tier-0 detector 실험 흔적 |
-| `/home/ubuntu/other_v2/` (이 repo **밖**) | **v2 설계 문서 + HTML 프로토타입만 존재**. 코드 없음. YOLO26s-Pose, CLIP ViT-L/14, Qwen2.5-VL-3B 같은 수치가 적힌 `ARCHITECTURE.md`/`COMPARE.md`는 계획서일 뿐 | 이전 분석(`analysis_deploy.md`, Opus 4.6)이 v2를 v1으로 착각한 전력 있음 |
-| `<OD>` / `<OPEN_VOCABULARY_DETECTION>` / `<CAPTION_TO_PHRASE_GROUNDING>` (Florence-2 task tokens) | Florence 어댑터에 메서드만 존재, 파이프라인 미연결. **실험 완료: phrase grounding은 "best-match localizer"로 hallucination** | Florence-2가 자체 제공하는 기능 |
-| `peft` / LoRA | `LORA_ENABLED=false`. `peft.PeftModel` 런타임 로드 지원 코드는 존재하나 어댑터 파일 없음 | 학습 파이프라인은 오프라인 수동 트리거 |
-| `critic_trainer.py` + `rule_updater.py` | **Dead Code** — Shadow 제거(2026-04-17) 이후 호출 경로 단절 | 과거 "자율 진화" 실험 흔적 |
-| `scenarios/prompts.py`의 `*_SCENARIO` 문자열 상수 | `get_scenario_prompt()`는 호출되나 반환된 prompt 문자열이 Florence 어댑터에서 무시됨 (task token만 사용) | 레거시 API 호환용 |
-
-**실제로 GPU 추론에 연관된 모델은 Florence-2-large 하나뿐**. Tier-2 Gemini는 Cloud API. 그 외 모든 VLM/detector/grounding 모델은 미연결이거나 미구현입니다.
-
-### Dead Code (제거 대기, 2026-04-17 Shadow 제거 후 경로 단절)
-
-| 파일 | LoC | 상태 | 비고 |
-|------|-----|------|------|
-| `model_server/evolution/critic_trainer.py` | 191 | Dead | Shadow에서만 호출되던 `train()` 트리거 사라짐 |
-| `model_server/evolution/rule_updater.py` | 337 | Dead | `apply_feedback_to_rules()` 호출 경로 없음 |
-| `model_server/agents/dynamic_agent.py` | 295 | Dead | 초기화만 존재 |
-| `model_server/base_detector.py` | 302 | Dead | **YOLO 기반 detector**, 정의만 존재. `main.py`에서 호출 0 |
-| `model_server/episode_manager.py` | 421 | Dead | `main.py`에서 import 없음. throwaway Episode만 생성 |
-| `db_server/models.py` | 102 | Dead | Django ORM 스키마. SQLite WAL로 대체됨 |
-| `frontend_server/views.py` | 1 | Empty | |
-| `fix_html.py` | - | Dead | 일회성 마이그레이션 스크립트 |
-
-**제거 시 예상 LoC 감소**: ~1,800 lines (~9%).
-
----
-
-## 아키텍처 다이어그램
+기준 설계 문서:
 
 ```text
-                         ┌─────────────────────────────────┐
-                         │   nginx (:80/443)                │
-                         │   dev-cctv.hio.ai.kr             │
-                         └──────────────┬──────────────────┘
-                                        │
-                         ┌──────────────▼──────────────────┐
-                         │  Frontend Server (:8002)         │
-                         │  Jinja2 + reverse proxy          │
-                         │  /monitor/adhoc                  │
-                         │  /monitor/florence-logs          │
-                         │  /monitor/gemini-logs            │
-                         │  /monitor/labeling   ← GT 수집    │
-                         │  /dashboard                      │
-                         └─────┬───────────────┬────────────┘
-                               │               │
-                  /api/vlm/*   │               │  /api/cameras|events|stats
-                               ▼               ▼
-┌──────────────────────────────────────┐  ┌──────────────────────┐
-│      Model Server (:8000)            │  │ DB Server (:8001)    │
-│                                      │  │ SQLite WAL           │
-│ ┌────────────┐   ┌────────────────┐  │  │                      │
-│ │StreamMgr   │   │InferScheduler  │  │  │ events               │
-│ │ RTSP rd    │   │ Dispatcher     │  │  │ cameras (+display_name)
-│ │ RingBuf    │   │ Worker×1       │  │  │ gemini_logs          │
-│ └─────┬──────┘   └───────┬────────┘  │  │ episode_reviews      │
-│       │                  │            │  │ worker_leases        │
-│       │             ┌────▼──────┐    │  └──────────────────────┘
-│       │             │Florence-2 │    │
-│       │             │Tier-1 GPU │    │
-│       │             │fp16 CUDA  │    │
-│       │             └─────┬─────┘    │
-│       │    caption (free-form text)  │
-│       │             ┌─────▼─────────┐ │
-│       │             │PipelineOrch + │ │
-│       │             │CaptionAnalyzer│ │
-│       │             │  ×3 scenarios │ │
-│       │             └─────┬─────────┘ │
-│       │              borderline conf  │
-│       │             ┌─────▼─────────┐ │
-│       │             │EvidenceRouter │ │
-│       │             │< 0.55 → Gemini│ │
-│       │             └─────┬─────────┘ │
-│       │              escalate (video) │
-│       │             ┌─────▼─────────┐ │
-│       │             │GeminiValidator│ │
-│       │             │ video clip    │ │
-│       │             │ hard gate +   │ │
-│       │             │ soft score    │ │
-│       │             └─────┬─────────┘ │
-│       │     ┌─────────────▼─────────┐ │
-│       └─────│ EventPostProcessor    │ │
-│             │ val_clip (retained)   │ │
-│             │ ev_{id}.mp4 (plain)   │ │
-│             │ ev_{id}_roi.mp4(over) │ │
-│             │ thumbnail.jpg         │ │
-│             └──────────┬────────────┘ │
-│                        │              │
-│             ┌──────────▼────────────┐ │
-│             │ FlushWorker → DB ─────────→ DB Server
-│             └───────────────────────┘ │
-│                                       │
-│   [LoRA DataCollector — passive]       │
-└───────────────────────────────────────┘
-
-Human feedback loop:
-  Events → /monitor/labeling UI → POST /api/vlm/feedback → event.human_feedback
-  (지금 자동 학습 루프 없음. 쌓인 라벨은 수동 분석·튜닝·A/B에 활용)
+E:\02_StayG\00_CCTV_Motion_Detection\github\HIO_V2_YOLO26_GEMINI_ARCHITECTURE.md
 ```
 
----
+현재 구현 폴더:
 
-## 모델 아키텍처 상세
-
-### Tier-1: Florence-2 (On-Device GPU)
-
-| 항목 | config.py 기본값 | 운영 `.env` | 설명 |
-|------|-------|-------------|------|
-| 모델 | `microsoft/Florence-2-large` | 동일 | ~770M 파라미터 VLM encoder-decoder (DaViT vision tower + BART-like decoder) |
-| 로드 | HF `AutoModelForCausalLM` | `trust_remote_code=True` | 캐시 `MODEL_SERVER_MODELS_DIR` (기본 `models/hf/`) |
-| 백엔드 | `pytorch` | `pytorch` | OpenVINO backend은 `_init_openvino` stub 존재, `_infer_openvino`는 PyTorch로 fallback |
-| 정밀도 | GPU fp16 / CPU fp32 | fp16 CUDA | `torch_dtype=torch.float16` + 추론 시 `torch.autocast(device_type='cuda', dtype=torch.float16)` |
-| 입력 크기 | 448 | **448×448** | `FLORENCE_INPUT_SIZE=448`. ⚠️ HF processor가 내부 768 bilinear upscale — 이중 resize 경로는 여전함 |
-| max_tokens | 512 | **200** | 이전 96 → 200으로 승격 (25.9% 캡션 cap 근접 문제 해소). 여전히 cap 아래 95th percentile |
-| num_beams | 3 | **1** | Greedy decoding. `do_sample=False`, `model.generate(max_new_tokens=200, num_beams=1)` |
-| caption_detail | `more` | **`more`** | `<MORE_DETAILED_CAPTION>` task token 사용 |
-| LoRA | `LORA_ENABLED=false` | `false` | `peft.PeftModel` 런타임 로드 지원 (`adapter_config.json` 존재 + 플래그 ON이면 `PeftModel.from_pretrained`) |
-
-#### Florence-2 추론 Hot Path (`florence_adapter.py:313~400`)
-
-```
-BGR numpy (카메라 프레임 최대 1280×720)
-  ↓ BaseVLMAdapter.preprocess_image(image)
-  ↓   cv2.resize(448×448, INTER_AREA) + BGR→RGB             [1차 resize]
-  ↓   → np.uint8 RGB array
-  ↓ PIL.Image.fromarray(image_rgb)
-  ↓ AutoProcessor(text=task_token, images=pil_image, return_tensors="pt")
-  ↓   internal bilinear upscale → 768×768                    [2차 resize]
-  ↓   text tokenize (task prefix + optional text_input)
-  ↓ inputs.to(cuda) → pixel_values + input_ids
-  ↓ with torch.inference_mode() + torch.autocast(cuda, fp16):
-  ↓   model.generate(
-  ↓     **inputs,
-  ↓     max_new_tokens=200, num_beams=1, do_sample=False
-  ↓   )
-  ↓ processor.batch_decode(generated_ids, skip_special_tokens=False)
-  ↓ processor.post_process_generation(
-  ↓     generated_text, task=task_token, image_size=pil_image.size
-  ↓ )
-  ↓ → 자유 캡션 텍스트 (task 따라 dict{task: str|dict} 파싱)
-  ↓ CaptionAnalyzer.analyze(caption, ScenarioType) × 3      [CPU regex μs]
-  ↓ → {is_detected, confidence, matched_keywords, object_hints, evidence}
+```text
+E:\02_StayG\00_CCTV_Motion_Detection\github\hio_intelligence_stream_v3
 ```
 
-- **`_run_task(image, task, text_input)`**: 내부 helper로 `<OD>`/`<OCR>`/`<CAPTION_TO_PHRASE_GROUNDING>`/`<OPEN_VOCABULARY_DETECTION>` 등도 호출 가능.
-- **`preprocess_image`**: `BaseVLMAdapter`에서 crop polygon zone 지원 (ROI crop 경로는 dual-path OFF라 현재 미호출).
+## 1. Architecture Diagram
 
-#### 지원 task tokens
-
-| Task | 운영 사용 | 메서드 | 설명 |
-|------|---------|--------|------|
-| `<MORE_DETAILED_CAPTION>` | ✅ 기본 | `infer()` | `FLORENCE_CAPTION_DETAIL=more` → `task_map['more']` |
-| `<DETAILED_CAPTION>` | 전환 가능 | `infer()` | `FLORENCE_CAPTION_DETAIL=detailed` |
-| `<CAPTION>` | 전환 가능 | `infer()` | `FLORENCE_CAPTION_DETAIL=basic|caption` |
-| `<OD>` | 미연결 | `detect_objects()` | COCO 91 클래스 detection. 실험 시 person/chair/monitor만 반환 |
-| `<DENSE_REGION_CAPTION>` | 미연결 | `_run_task()` | 씬 수준 region captioning |
-| `<CAPTION_TO_PHRASE_GROUNDING>` | 미연결 | `ground_phrase()` | 자유 phrase → bbox. **hallucination 확인** — 존재 여부 무관하게 가장 유사한 영역 반환 |
-| `<OPEN_VOCABULARY_DETECTION>` | 미연결 | `_run_task()` | "banknote / cash / wallet / korean banknote"가 전부 같은 영역을 서로 다른 라벨로 반환 (bbox 영역 1.7~1.9% 동일) |
-| `<OCR>` / `<OCR_WITH_REGION>` | 미연결 | - | 텍스트 추출 |
-| `<REGION_PROPOSAL>` | 미연결 | - | 객체 제안 |
-
-> **결정적 증거 (2026-04-17 실험)**: FP 5건의 cash 이벤트 thumbnail에 `<OPEN_VOCABULARY_DETECTION>` 테스트 결과 — `banknote` 1.87%, `paper money` 1.84%, `cash` 1.75%, `wallet` 1.72%, `korean banknote` 1.88%가 **전부 1.7-1.9% 동일 영역**을 반환. Florence는 abstention 없이 "best-match localizer"로 동작. GT calibration 없이는 noise 증폭기.
-
-### Tier-2: Gemini Vision (Cloud API)
-
-| 항목 | 값 | 근거 |
-|------|-----|-----|
-| 모델 | `gemini-3.1-flash-lite-preview` | `GEMINI_MODEL` .env (config.py 기본 `gemini-2.5-flash-lite`) |
-| 프롬프트 버전 | `evidence-v1.1` / 본문 `v.26.04.17` | `EVIDENCE_PROMPT_VERSION` 상수 + reason_bullets 첫 줄 표식 |
-| Temperature | 0.1 | deterministic 경향 |
-| top_k / top_p | 1 / 1.0 | 거의 greedy |
-| max output tokens | 1500 | `GenerateContentConfig` |
-| response mime | `application/json` | JSON 강제 |
-| 타임아웃 | 180초 (`GEMINI_TIMEOUT_SEC=180`) | config 기본 30초보다 6× |
-| 동시 호출 | 1 (`GEMINI_MAX_CONCURRENT=1`) | `asyncio.BoundedSemaphore` |
-| 기본 모드 | `EVIDENCE_MODE=video_only` | storyboard/image fallback 비활성 |
-| 입력 clip | 1280×720 H.264 CRF23, preset fast, `+faststart`, yuv420p | FFmpeg, ~3Mbps, 10초 |
-| 실패 정책 | Fail-Open | `not enabled or not client` → `return True, 1.0, "Validation disabled"` |
-
-#### 검증 모드 (`validate_event_evidence(packet, mode)`)
-
-| 모드 | 우선순위 | 비고 |
-|------|---------|------|
-| `hybrid` | cash: storyboard → video → image. 그 외: video → storyboard → image | 기본이 아님 |
-| `video_first` | video → storyboard → image | |
-| **`video_only`** | video 단독 | **운영 기본값**, fallback 없음 |
-| `images_first` / `storyboard` | storyboard (최대 12 keyframes) → image → video | |
-| `image` | 단일 프레임 → storyboard → video | |
-
-#### Gemini 통합 프롬프트 (`DEFAULT_UNIFIED_PROMPT`, `gemini_validator.py:37~301`)
-
-251줄 규모의 통합 프롬프트로 **4가지 event_policy**를 판정:
-
-1. `CASH_TRANSACTION` — 현금거래
-2. `THREAT_TO_CASHIER` — 캐셔 위협/폭력
-3. `FIRE_ALERT` — 실제 화재
-4. `STAFF_CASH_THEFT_SUSPECT` — 내부자 현금 절도 의심
-5. `NONE` — 해당 없음
-
-##### 한국 원화 맥락 주입
-
-```
-Currency context: This environment uses Korean Won (KRW).
-Korean banknotes have distinctive colors
-(blue 1000, green 5000, orange 10000, yellow 50000)
-and are larger than receipts. Do not claim "Korean cash"
-unless you see these traits.
-```
-
-##### Visual hint overlay (주의사항)
-
-Gemini는 yellow polygon(`CASHIER ZONE`) + cyan polygon(`DRAWER`)을 **attention hint**로만 보고, polygon 자체는 reason_bullets에 묘사 금지. "rectangle/frame overlay/yellow box" 같은 표현 금지.
-
-##### CASH_TRANSACTION Hard Rules (H1 ∧ H2 ∧ H3 전부 PASS 필요)
-
-| 규칙 | PASS 조건 | FAIL 조건 |
-|------|---------|---------|
-| **H1. CASH_VISUAL_CONFIRM** | banknote-like printing/color/pattern, 분명한 지폐 1장+, 또는 지폐 counting/peeling | plain white slip, 단단/반사 객체(카드/기기), smartphone 화면, 모호함 |
-| **H2. OWNERSHIP_TRANSFER** | 객체가 한 사람 손 → 다른 사람 손으로 이동. 교환 방향 가시. video면 짧은 가림 허용 단 전후로 객체 보여야 함 | 한 사람만 다룸, 심한 가림 |
-| **H3. ACTIVE_TRANSACTION_CONTEXT** | counter/register 근처. 직원이 register 조작/drawer 오픈/상품 처리/결제/상호작용 | counter/register 없음, 직원이 개인 행동(식사/개인폰/잡담) 중 |
-
-##### CASH_TRANSACTION Soft Rules (H1-H3 통과 후 평가)
-
-| 등급 | 규칙 | 설명 |
-|------|-----|------|
-| **S_STRONG_1** | Cash drawer 명확히 열림 or 객체가 cash slot/till에 삽입 | 40점 → `safe_drawer` |
-| **S_STRONG_2** | 직원이 지폐 counting/peeling/aligning | 40점 → `money_likelihood` |
-| **S_STRONG_3** | 직원이 거스름돈(지폐·동전) 반환 | 40점 → `hand_to_hand` |
-| S_WEAK_1 | 전달 순간이 명확히 가시 | |
-| S_WEAK_2 | 손님이 교환 후 돌아서거나 떠남 | |
-| S_WEAK_3 | 양쪽 모두 객체를 봄 | |
-
-##### Policy Scores
-
-```json
-{
-  "money_likelihood":  0 | 25 | 40,   // 0=H1 fail, 25=banknote traits, 40=S_STRONG_2
-  "hand_to_hand":      0 | 35 | 40,   // 0=H2 fail, 35=transfer visible, 40=S_STRONG_3
-  "safe_drawer":       0 | 40,        // 0=S_STRONG_1 fail, 40=drawer open/insert
-  "non_cash_penalty":  -30 | -15 | 0, // -30=phone/card/tablet, -15=white slip, 0=OK
-  "total_score": sum
-}
-```
-
-##### Decision Rule (모두 참일 때만 `CASH_TRANSACTION` 허용)
-
-1. H1, H2, H3 전부 PASS
-2. S_STRONG_1 / S_STRONG_2 / S_STRONG_3 중 최소 1 PASS
-3. `safe_drawer=40` OR `money_likelihood=40` OR `hand_to_hand=40` 중 하나 이상
-
-→ False면 `event_policy=NONE`, `decision=FALSE_POSITIVE` (upstream이 cash-like인 경우) or `NOT_APPLICABLE`.
-
-##### THREAT_TO_CASHIER Scores
-
-```json
-{
-  "mandatory_score": 0, "supporting_score": 0, "negative_score": 0,
-  "total_score": 0,
-  "threat_level": 0-4,
-  "threat_label": "CLEAR | TENSE | INTIMIDATION | PHYSICAL | WEAPON"
-}
+```text
++-------------------+
+| RTSP CCTV Camera  |
++---------+---------+
+          |
+          v
++---------+-----------------------------------------------+
+| StreamManager                                           |
+| - RTSP reconnect (exponential backoff + jitter)         |
+| - NVDEC (h264_cuvid) -> CPU fallback allowed            |
+| - ingest downsample to INGEST_DOWNSAMPLE_HEIGHT (720)   |
+| - ring buffer (deque + monotonic ts)                    |
++---------+-----------------------------------------------+
+          |
+          v
++---------+---------+
+| InferenceScheduler|
+| - per-camera FPS  |
+| - latest sampling |
+| - burst handling  |
++---------+---------+
+          |
+          v
++---------+---------+
+| HioV3Pipeline     |
++---------+---------+
+          |
+          v
++---------+-----------------------------------------------+
+| Tier 1: YOLO26 / pose / ROI                             |
+| - YOLO26 pose: person bbox + keypoints + wrists         |
+| - YOLOv26 fire: fire/smoke candidate                    |
+| - CashierTrackerV3: cashier/customer role + linger      |
+| (generic YOLO26 detect disabled by default)             |
++---------+-----------------------------------------------+
+          |
+          | only tier1-candidate scenarios pass through
+          v
++---------+-----------------------------------------------+
+| Tier 2: SigLIP semantic layer (gated)                   |
+| - cash  : SigLIP2 frame/clip scoring                    |
+|           (google/siglip2-base-patch16-224)             |
+|           positive vs neutral prompt                    |
+| - fire  : Fire-Detection-Siglip2 (fire/normal/smoke)    |
+|         + SigLIP zero-shot neutralizer prompts          |
+| - viol. : Human-Action-Recognition (fighting class)     |
+|           minus max(hugging, clapping, laughing, dance) |
+|           * V3_ACTION_NEUTRAL_DAMPEN                    |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| TemporalEventEngine                                     |
+| - exchange_band + pose + SigLIP weighted proposal       |
+| - cash/fire/violence only                               |
+| - polygon_coords + skeleton_summary metadata            |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| EpisodeManager                                          |
+| - repeated-frame proposal merge                         |
+| - min hits / min duration                               |
+| - event cooldown default 20 sec                         |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| Event Admission                                         |
+| - event JSON pending                                    |
+| - capture clip_entries immediately from ring buffer     |
+| - duplicate camera/scenario job merge/drop              |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| EventPostProcessor                                      |
+| - async Gemini/clip worker (POSTPROCESS_WORKERS=2)      |
+| - queue full -> dead_letter/events_dropped.jsonl        |
+| - queue latency > validation window -> validation_error |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| CandidateClipBuilder                                    |
+| - raw: reuse val_{event_id}.mp4                         |
+| - context_overlay.mp4: red cashier ROI + skeleton/SoM   |
+|   (rendered at clip_fps / V3_OVERLAY_FPS_DIVISOR)       |
+| - skeleton.json                                         |
+| - FFmpeg preset=ultrafast, crf=28                       |
++---------+-----------------------------------------------+
+          |
+          v
++---------+-----------------------------------------------+
+| Tier 3: GeminiTemporalValidatorV3                       |
+| - raw + context_overlay only                            |
+| - cash hard gates + KRW context                         |
+| - fire hard rules (sunlight/LED/extinguisher reject)    |
+| - fail-closed on API/disabled errors                    |
++---------+-----------------------------------------------+
+          |
+          v
++---------+---------+         +----------------------+
+| LocalStorage     | ------>  | FlushWorker / DB     |
+| events/clips/log |          | SQLite event storage |
++---------+--------+          +----------+-----------+
+          |                              |
+          v                              v
++---------+-----------------------------------------------+
+| Frontend :8002                                          |
+| dashboard / adhoc monitor / proposal logs / Gemini logs |
+| labeling feedback (MJPEG 3 fps cap)                     |
++---------------------------------------------------------+
 ```
 
-Severity 매핑: `CLEAR=none`, `TENSE=low`, `INTIMIDATION=medium`, `PHYSICAL=high`, `WEAPON=critical`.
+## 2. Current Runtime Summary
 
-##### FIRE_ALERT Scores
+| 항목 | 현재 값 |
+|---|---|
+| 활성 시나리오 | `cash`, `fire`, `violence` |
+| pipeline version | `v3-yolo26-tier1-siglip2classifier-episode-gemini` |
+| Tier 1 | YOLO26 pose tracking + fire/smoke YOLO + exchange-band pose rules (generic detect disabled) |
+| Tier 2 | SigLIP2 cash frame/clip scoring + Fire-Detection-Siglip2 + Human-Action-Recognition |
+| Event stabilization | `EpisodeManager` |
+| Final validator | Gemini temporal video validator |
+| Candidate clip policy | minimal: `raw`, `context_overlay`, `skeleton_json` |
+| Gemini API 오류 정책 | TP 처리 금지, `validation_error` |
+| CPU fallback | 기본 금지: `ALLOW_CPU_FALLBACK=false` |
+| Gemini concurrency | `GEMINI_MAX_CONCURRENT=2` |
+| BASE_FPS / BURST_FPS | `3.0 / 3.0` (pose 3fps, 4 camera budget) |
+| Ingest downsample | `INGEST_DOWNSAMPLE_HEIGHT=720` |
+| Overlay fps | `clip_fps / V3_OVERLAY_FPS_DIVISOR` (현재 /1) |
+| FFmpeg 인코딩 | `preset=ultrafast, crf=23` |
+| DB flush 주기 | `FLUSH_INTERVAL_SEC=120` (스팟 대응) |
 
-```json
-{"fire_confidence": 0.0-1.0, "smoke_confidence": 0.0-1.0}
+## 3. Model Layer
+
+| 모델 | 파일/설정 | 역할 | Tier | 라이선스 |
+|---|---|---|---|---|
+| YOLO26 pose | `models/yolo26s-pose.pt` | 사람 bbox, keypoints, wrist 좌표 (cash ROI 필수) | 1 | - |
+| YOLOv26 fire/smoke | `models/yolov26_fire_detection_best.pt` | fire/smoke YOLO gate | 1 | HF `SalahALHaismawi/yolov26-fire-detection` |
+| YOLO26 generic detect | `YOLO26_DETECT_WEIGHTS` (**empty, disabled**) | 4 camera 배포에서는 드롭 (COCO class 한계) | - | - |
+| SigLIP2 base zero-shot | `google/siglip2-base-patch16-224` | cash 현재 프레임 semantic + cash full-clip aggregation + fire neutralizer | 2 | Apache 2.0 |
+| **Fire-Detection-Siglip2** | `prithivMLmods/Fire-Detection-Siglip2` | SigLIP2 fine-tuned 3-class (Fire / Normal / Smoke, 99.41% acc) | 2 | Apache 2.0 |
+| **Human-Action-Recognition** | `prithivMLmods/Human-Action-Recognition` | SigLIP2 fine-tuned 15-class (fighting F1 0.84 + 14 neutral class) | 2 | Apache 2.0 |
+| Gemini | `.env`의 `GEMINI_MODEL` | 최종 temporal validation (KRW hard gate + fire hard rule) | 3 | - |
+
+모든 모델이 **오픈 웨이트**입니다. Fine-tuned SigLIP2 2개 base는 `google/siglip2-base-patch16-224`
+(92.9M params, 224×224). YOLO fire 모델의 `other`, `background`, `none` 계열 label은
+fire signal로 사용하지 않습니다.
+
+### 3.1 Tier-2 classifier head 동작
+
+Tier-1 (YOLO pose / YOLO fire / pose rules)에서 후보 scenario가 발생한 프레임에만
+classifier가 돌아갑니다. **매 프레임 상시 실행 아님**.
+
+| 시나리오 | Tier-1 trigger | Tier-2 모델 | 수식 |
+|---|---|---|---|
+| cash | exchange_band soft/hard hit, handover, motion/crossing | SigLIP2 frame + full-clip aggregation | positive-vs-neutral prompt softmax over sampled full frames |
+| fire | YOLO fire bbox | Fire-Detection-Siglip2 | `max(fire_prob, smoke_prob)`, zero-shot neutralizer로 감쇠 |
+| violence | pose `close_person_pair` / `cross_person_wrist_near_body` | Human-Action-Recognition | `max(0, fighting - V3_ACTION_NEUTRAL_DAMPEN × max(hugging, clapping, laughing, dancing))` |
+
+Classifier는 직접 `AutoModel` logits → softmax → 확률을 쓰므로 zero-shot 대비 **text encoder forward가 없어 프레임당 20~30% 빠름**. 로드 실패 시 `SemanticPrefilter`의 exponential backoff retry 경로를 따라갑니다.
+
+## 4. Runtime Flow
+
+```text
+1. StreamManager가 RTSP 프레임을 720p로 다운샘플 (INGEST_DOWNSAMPLE_HEIGHT) 후 ring buffer에 유지
+2. InferenceScheduler가 최신 프레임을 샘플링 (BASE_FPS=3.0, V3_POSE_FPS=3.0)
+3. YOLO26Runner가 pose + fire 모델 실행 (generic detect 드롭)
+4. TemporalEventEngine이 Tier 1 후보를 계산
+5. Tier 1 후보가 있는 scenario만 SigLIP 경로 실행
+     - cash  : zero-shot SigLIP2 (google/siglip2-base-patch16-224)
+     - fire  : Fire-Detection-Siglip2 + SigLIP zero-shot neutralizer
+     - viol. : Human-Action-Recognition (fighting - neutral dampen)
+     - cash soft_hit: hard pass 전이라도 5초 window 내 2회 hit면 최근 15초 full-clip SigLIP2 aggregation 실행
+6. SigLIP/classifier score와 neutralizer를 반영해 proposal 재계산
+7. EpisodeManager가 반복 프레임 proposal을 하나의 episode로 안정화 (cooldown 20s)
+8. 안정화된 이벤트만 EventPostProcessor queue에 등록
+9. queue 등록 시점에 validation clip entries를 즉시 확보
+10. CandidateClipBuilder가 overlay fps = clip_fps / V3_OVERLAY_FPS_DIVISOR 로 렌더
+11. Gemini가 raw + context_overlay를 보고 hard gate 검증
+12. LocalStorage에 event, clip, thumbnail, logs 저장 (FFmpeg ultrafast / crf 28)
+13. FlushWorker가 DB Server로 2분 간격 batch sync (FLUSH_INTERVAL_SEC=120)
+14. Frontend에서 모니터링/라벨링 (MJPEG 3 fps cap)
 ```
 
-실제 flame / smoke 가시 시에만 valid. 소화기/알람/표지만으로는 NONE.
+## 5. Scenario Algorithms
 
-##### STAFF_CASH_THEFT_SUSPECT Scores
+### 5.1 Cash
 
-```json
-{
-  "suspicion_level": 0-3,
-  "suspicion_label": "none | low | medium | high",
-  "cash_box_access": true|false,
-  "looks_around": true|false,
-  "moves_cash_to_personal_area": true|false,
-  "customer_present": true|false,
-  "paperwork_or_reconciliation": true|false
-}
+cash는 단순히 손목이 ROI 안에 들어간다고 확정하지 않습니다. Tier 1에서 아래 신호를 조합합니다.
+
+| 신호 | 의미 |
+|---|---|
+| `wrist_inside_cashier_zone` | 손목이 cashier ROI 안에 있음 |
+| `handover_like_pose` | 복수 사람 손목/손 위치가 거래 동작처럼 가까움 |
+| `cashier_tracker_customer_staff_wrist_proximity` | CashierTrackerV3가 직원/고객 역할과 손목 근접을 감지 |
+| `multiple_persons_near_counter` | 카운터 주변에 여러 사람 |
+| `siglip_cash_context` | Tier 2 SigLIP이 결제/현금거래 장면과 유사하다고 판단 |
+
+`CashierTrackerV3`는 원본 v1의 cashier/customer 역할 추적 개념을 v3 pose 구조에 맞게 이식한 모듈입니다. 직원은 cashier zone에서 반복 관측되는 사람으로 추정하고, 너무 오래 같은 위치에 머무는 사람은 고객 linger로 재분류합니다.
+
+> cash는 별도 bbox detector를 쓰지 않습니다. 한국 원화/손 전달은 YOLO class로 안정화하기 어렵기 때문에, Tier-1은 `exchange_band` 근처 pose/motion/crossing으로 후보를 만들고 Tier-2는 SigLIP2 full-frame / full-clip semantic aggregation으로 보강합니다. 최종 판정은 Gemini hard gate (KRW + ownership transfer)가 담당합니다.
+
+### 5.2 Fire
+
+fire는 YOLO fire 후보가 Tier-1 gate입니다. Tier-2에서 Fire-Detection-Siglip2가 직접 3-class 확률을 내고, SigLIP zero-shot neutralizer가 조명/반사/소화기 장면을 감쇠합니다.
+
+Fire-Detection-Siglip2 출력:
+
+```text
+fire    : 불꽃이 실제로 보이는 정도
+smoke   : 연기 plume이 보이는 정도
+normal  : 정상 실내 조명
 ```
 
-##### 응답 파싱 (`_parse_new_response_format`)
+SigLIP zero-shot neutralizer prompt (`semantic_filter.PROMPTS["fire"]`):
 
-| 필드 | 타입 | 역할 |
-|------|-----|------|
-| `event_policy` | str | 5중 선택 |
-| `event_type_detected` | str | `cash|violence|fire|staff_cash_theft|none` |
-| `is_valid_event` | bool | 최상위 판정 |
-| `decision` | str | `TRUE_POSITIVE|FALSE_POSITIVE|NOT_APPLICABLE` |
-| `severity_label` | str | `none|low|medium|high|critical` |
-| `confidence` | float | 0.0-1.0 |
-| `policy_scores` | dict | 위 4개 정책별 score 구조 |
-| `reason_bullets` | list[str] | 첫 줄에 `- [PROMPT_VERSION] v.26.04.17` 강제, "appears / likely / seems" 같은 hedge 금지 (있으면 NONE) |
+```text
+# positive
+visible fire flames
+visible smoke filling the scene
+a fire emergency in an indoor camera view
 
-##### Event type correction
-
-Gemini가 업스트림 `original_event_type`과 다른 `event_type_detected`를 내면 `corrected_event_type`로 교정. 단 `violence → cash` 방향은 중복 방지 목적으로 **차단** (is_valid=False로 강제).
-
-### LoRA 파인튜닝 (오프라인, 현재 비활성)
-
-| 항목 | 값 |
-|------|-----|
-| 베이스 | `microsoft/Florence-2-large` |
-| Rank / Alpha / Dropout | 8 / 16 / 0.05 |
-| 타겟 레이어 | `q_proj`, `v_proj`, `k_proj`, `out_proj` |
-| Optimizer | AdamW (lr=1e-4, wd=0.01) |
-| 배치 / 에폭 | 4 / 3 |
-| 최소 샘플 | 50 |
-
-> LoRA는 현재 **data collection만 활성**. 학습은 수동 트리거. GT TP 30-50건 이상 쌓이면 실행 고려.
-
----
-
-## 추론 파이프라인 흐름
-
-### Caption Sharing 최적화
-
-```
-┌──────────────────────────────────────────────────────────────┐
-│ 비효율 (안 씀):                                                │
-│   Frame → Florence(cash) → Florence(fire) → Florence(viol)   │
-│   = GPU 3회/프레임                                             │
-│                                                              │
-│ Caption Sharing (운영):                                        │
-│   Frame → Florence(1회) → caption 텍스트 공유                  │
-│         ├→ CaptionAnalyzer(cash)     ← CPU regex (μs)         │
-│         ├→ CaptionAnalyzer(fire)     ← CPU regex (μs)         │
-│         └→ CaptionAnalyzer(violence) ← CPU regex (μs)         │
-│   = GPU 1회/프레임                                             │
-└──────────────────────────────────────────────────────────────┘
+# neutralizer
+sunlight glare or bright reflection with no fire
+TV / LED screen / sign that looks bright
+red or orange sign lamp or decorative light
+fire extinguisher with no smoke or flame
+steam fog blur or camera artifact
 ```
 
-### CaptionAnalyzer 매칭 엔진 (`scenarios/base_scenario.py:240~547`)
+`siglip_neutralizer_score`가 높고 `siglip_fire_score`가 낮으면 (Tier-2 gate `V3_FIRE_SIGLIP_MIN_SCORE=0.52` 미만) fire score가 `× 0.35` 감쇠됩니다. SigLIP fire ≥ 0.65이면 YOLO 점수보다 SigLIP * 0.8이 우선 (작은 불씨도 놓치지 않도록).
 
-#### 키워드 계층 (시나리오별)
+### 5.3 Violence
 
-| 계층 | Cash 가중치 | Violence 가중치 | Fire 가중치 | 역할 |
-|-----|-----------|--------------|-----------|------|
-| `strong_positive` | **0.3** | 0.35 | 0.4 | 직접 증거 키워드 (cash/money/banknote, fight/punch, fire/flame) |
-| `moderate_positive` | **0.1** | 0.15 | 0.15 | 간접 증거 (counter, teller, drawer, holding, bank) |
-| `context_phrases` | **0.15** | 0.45 | 0.5 | 복합 구문 ("handing to customer", "hitting someone", "on fire") |
-| `negative` | **-0.3** | -0.25 | -0.2 | 반증 (credit card, handshake/hugging, sunset/candle/fireplace) |
-| `neutralizing_phrases` | 무효화 | 무효화 | 무효화 | `strong` 매치를 컨텍스트 보고 무효화 (e.g. `fire extinguisher`, `billboard`) |
-| `object_hints` | 0점 | - | - | 점수 0, Tier-2 metadata로만 전달 (Florence가 본 객체 추론 힌트) |
+violence는 YOLO weapon class가 사실상 없어서 pose + Tier-2 classifier 조합으로 proposal을 만듭니다. 최종 판단은 Gemini가 원본 영상을 보고 합니다.
 
-#### 신뢰도 계산 (`analyze()`)
+| 신호 | 의미 |
+|---|---|
+| `close_person_pair` | 사람 bbox/center가 비정상적으로 가까움 |
+| `cross_person_wrist_near_body` | 한 사람의 손목이 다른 사람 bbox 근처 |
+| `siglip_violence_context` | Human-Action-Recognition의 `fighting - dampen × max(neutral)` |
 
-```python
-score = (
-    len(strong_matches)   * weights['strong']   +
-    len(moderate_matches) * weights['moderate'] +
-    len(context_matches)  * weights['context']  +
-    len(negative_matches) * weights['negative']
-)
-confidence = max(0.0, min(1.0, score))  # clamp
+Human-Action-Recognition 15-class 중 다음을 활용합니다:
+
+| 용도 | 클래스 |
+|---|---|
+| positive (violence) | `fighting` |
+| **neutral dampen** (friendly interaction 차감) | `hugging`, `clapping`, `laughing`, `dancing` |
+| unused (현재 노드에 영향 없음) | calling, cycling, drinking, eating, listening_to_music, running, sitting, sleeping, texting, using_laptop |
+
+수식: `violence_score = max(0, fighting - V3_ACTION_NEUTRAL_DAMPEN × max(hugging, clapping, laughing, dancing))`
+
+`V3_ACTION_FIGHT_MIN_SCORE=0.40`이 Tier-2 semantic gate의 임계값이며 TemporalEventEngine에서 violence bonus cap은 0.45입니다.
+
+## 6. EpisodeManager
+
+`EpisodeManager`는 같은 사건이 여러 프레임에서 반복 proposal로 올라오는 문제를 줄입니다.
+
+| scenario | min hits | min duration | high confidence |
+|---|---:|---:|---:|
+| cash | 2 | 1.0 sec | 0.85 |
+| fire | 2 | 1.0 sec | 0.80 |
+| violence | 3 | 2.0 sec | 0.90 |
+
+episode 정책:
+
+```text
+- 아직 안정화되지 않은 proposal은 이벤트로 내보내지 않음
+- 같은 camera/scenario가 최근 방출됐으면 cooldown 동안 suppress
+- 기본 cooldown은 V3_EPISODE_COOLDOWN_SEC=20
+- UI의 event_cooldown_sec도 기본 20초로 동작
 ```
 
-`is_detected` 판정 트리거 (`is_detected = confidence > 0 and has_signal`):
-- `len(strong_matches) > 0` OR
-- `len(context_matches) > 0` OR
-- **H2H fallback**: `has_location ∧ has_action` (moderate 매치 안의 LOCATION set과 ACTION set 교집합)
+## 7. Candidate Clip Policy
 
-```python
-_LOCATION_KEYWORDS = {'counter', 'cashier', 'checkout', 'front desk',
-                      'reception', 'drawer', 'bank', 'bank teller',
-                      'teller', 'store', 'lobby'}
-_ACTION_KEYWORDS   = {'handing', 'holding', 'passing', 'reaching',
-                      'exchanging', 'giving', 'receiving',
-                      'placing', 'picking'}
-has_h2h = bool(_LOCATION_KEYWORDS & set(moderate_matches)) \
-          and bool(_ACTION_KEYWORDS & set(moderate_matches))
+v3는 더 이상 이벤트 1건마다 여러 overlay mp4를 만들지 않습니다.
+
+기본 생성 artifact:
+
+| key | 실제 파일 | 설명 |
+|---|---|---|
+| `raw` | `val_{event_id}.mp4` | Gemini가 보는 원본 full-frame validation clip |
+| `context_overlay` | `{event_id}_context_overlay.mp4` | full-frame overlay with cashier/exchange/staff zones + skeleton/SoM marker, fps=`clip_fps / V3_OVERLAY_FPS_DIVISOR` |
+| `skeleton_json` | `{event_id}_skeleton.json` | skeleton summary metadata |
+
+기본 생성하지 않는 것:
+
+```text
+{event_id}_raw.mp4
+{event_id}_skeleton_overlay.mp4
+{event_id}_cashier_zone_overlay.mp4
+cashier ROI crop video
 ```
 
-#### Neutralizing phrases (2-pass masking)
+중요 원칙:
 
-```python
-# 1차: strong_matches에 해당 키워드 있는지 확인
-# 2차: 해당 키워드 주변에 neutralizing 구문이 모두 덮고 있다면
-#      캡션 복사본에서 neutralizing phrase 영역을 공백으로 mask
-# 3차: masked 캡션에 키워드가 여전히 보이면 neutralize 안 함,
-#      그렇지 않으면 strong_matches에서 제거
+```text
+- crop 금지
+- Gemini는 원본 CCTV 구도 전체를 봐야 함
+- overlay는 1개 context_overlay만 저장
+- raw는 validation clip을 재사용
+- overlay 렌더링은 save_clip_stream으로 frame-by-frame 처리
+- overlay fps는 clip_fps / V3_OVERLAY_FPS_DIVISOR (현재 /1, Gemini 전달 전 FPS 다운샘플 없음)
+- FFmpeg: preset=ultrafast, crf=23 (FFMPEG_PRESET / FFMPEG_CRF로 조정)
 ```
 
-예시:
-- `fire`: `fire extinguisher`, `fire exit`, `fire escape`, `fire alarm`, `fire department`, `fire hydrant`, `fire truck`, `fire safety`, `fire door`, `fire hose`, `fire prevention`
-- `cash`: `cash register`만 (그러나 `cash register` 자체는 강한 cash 신호라 neutralize 안 됨 — 주석에 명시)
-- `bill`: `billboard`
+## 8. Gemini Validation
 
-#### Regex caching
+Gemini 입력은 최대 2개 영상입니다.
 
-전역 class 변수 `_compiled_patterns: Dict[str, re.Pattern] = {}`. `\b{escape(kw)}\b` + `re.IGNORECASE`로 lazy 컴파일. word-boundary로 substring 오탐(`billing`이 `bill` 매칭되는 문제) 차단.
-
-#### Cash H2H (Hand-to-Hand) 키워드 상세
-
-**strong_positive** (9개):
-```
-cash, money, banknote(s), currency, dollar, won, coins,
-paying, payment, transaction, cash register, paper money, cash payment
-```
-*제거됨*: `bill/bills/notes/change` — 다의어 FP 심각 (`restaurant bill`, `taking notes`, `change clothes`). `bill`만 moderate로 강등.
-
-**moderate_positive** (~30개): 장소 + 동작 2축으로 구성
-- 장소: `counter, cashier, checkout, front desk, reception, drawer, receipt, bank, bank teller, teller, store, lobby, customer`
-- 동작: `handing, holding, passing, reaching, exchanging, giving, receiving, placing, picking`
-- 소지품: `wallet, purse, envelope`
-- 강등: `bill, bills`
-- H2H: `two men, two people, two women, two persons, facing each other, across the counter, across the desk, leaning over, leaning forward`
-
-**context_phrases** (~50개): H2H 전달 구문
-- 최상위: `from one person to another`, `between two people`, `staff to customer`, `customer to staff`, `handing/giving/receiving to/from customer/staff`, `hand to hand`, `hand-to-hand`
-- 전달: `handing a piece of paper`, `passing something`, `giving an object`, `handing over`, `reaching across`
-- 현금 직접: `giving/receiving/counting money`, `counting bills`, `holding cash`, `cash drawer`
-- 서랍: `opening drawer`, `putting into drawer`, `taking from drawer`
-- 지갑: `reaching into wallet`, `pulling out wallet`, `opening wallet`, `reaching into pocket`
-- 접객: `face to face`, `talking to customer`, `helping a customer`, `serving a customer`, `waiting at the counter`, `standing at the counter`
-
-*제거됨* (과도한 FP):
-- `holding a small/black/brown/white/blue/green/red ...` — 모든 물체에 매칭
-- `holding an object/objects` — 3794건 중 대부분 비현금
-- `holding a paper/papers/cover/file/bag` — 서류/가방 오탐
-- `placing something`, `picking something`, `picking up` — 일반 동작
-
-**object_hints** (~25개): 점수 0점, Gemini에 `detection_metadata.object_hints`로 전달
-- 종이 계열: `paper, piece of paper, folded paper, envelope, receipt, document`
-- 현금: `cash, money, bill, bills, banknote, coin, coins, change`
-- 카드: `card, credit card, debit card`
-- 지갑: `wallet, purse`
-- Florence 오인 대상: `phone, mobile, remote, remote control, small object, black object, object, cover, bag, file, papers, yellow/blue/brown object`
-
-**negative** (현재 cash는 축소됨):
-```
-credit card, debit card, card reader, swipe, contactless, terminal
-```
-*제거됨*: `phone/mobile` — Florence가 현금을 "phone"으로 자주 오인하므로 Tier-2가 판별 담당.
-
-#### Violence 키워드 (요약)
-- strong: `fight(ing), punch(ing), attack(ing), struggle(ing), violent, violence, assault(ing), shove, slap, kick`
-- moderate: `aggressive, angry, confrontation, conflict, restrain, threaten(ing), yelling, screaming, falling down, knocked`
-- context: `hitting someone/person/him/her, pushing someone, grabbing someone, pulling hair, throwing punch, physical altercation`
-- negative: `handshake, hug(ging), friendly, greeting, playing, children, laughing, smiling, waving, keyboard, button, typing`
-
-#### Fire 키워드 (요약)
-- strong: `fire, flame(s), burning, blaze, smoke, ignite, combustion, inferno`
-- moderate: `orange/red glow, haze, hazy, emergency, sprinkler, charred, scorched, smoldering`
-- context: `on fire, catching fire, thick smoke, smoke rising/coming/billowing, flames spreading`
-- neutralizing: 위 목록 참조 (소화기/비상구/경보 등 12개)
-- negative: `lamp, screen, monitor, reflection, sunset, warm lighting, neon, candle, fireplace, cigarette, no smoking sign, extinguisher`
-
-#### 실측 행동 (cash 이벤트 186건 분석, 2026-04-17 기준)
-
-- `matched_keywords=[]` — **186/186 전부 빈 배열** (strong_positive 매칭 0건)
-- `holding` 캡션 포함 — **186/186 (100%)** ← cash 이벤트의 실질 트리거
-- `desk` 147건 (79.0%), `bank` 38건 (20.4%), `counter` 35건 (18.8%), `teller` 22건 (11.8%)
-- `standing` 98건, `sitting` 97건
-- **캡션에 `cash`/`bill`/`banknote`/`money`/`wallet`/`drawer` 매칭 — 0건 (0.00%)**
-- Tier-1 confidence p50 = **0.40** (모두 0.30~0.70 경계)
-- Human labeled — **1/186** (GT 부족이 가장 큰 병목)
-
-전체 1000건 캡션 기준 어휘 분포:
-- `desk` 932 (전체), `bank` 312 (31.2% — Florence가 호텔 데스크를 "bank"로 부름), `teller` 59, `counter` 26, `standing` 37, `holding/hand` 12
-- Unique caption 382/1000 (38.2%) — 상위 3개가 234건(23.4%) 반복 (정적 호텔 프론트 반복 추론)
-
-#### Cash H2H (Hand-to-Hand) 탐지 (설계)
-
-```
-H2H 양성 = 위치 키워드 (counter/cashier/desk/teller/register/drawer)
-         AND
-         행동 키워드 (handing/holding/passing/reaching/exchanging)
+```text
+1. raw
+2. context_overlay
 ```
 
-실측상 이 경로로 대부분 이벤트가 conf 0.30~0.55 달성 → 전부 Gemini로 에스컬레이션.
+`context_overlay`의 빨간 박스는 cashier/counter area를 표시합니다. 현금거래는 이 빨간 overlay box가 표시한 cashier 영역 안 또는 근처에서 일어나는지 봅니다. 단, 빨간 박스 자체, skeleton line, SoM marker는 사건 증거가 아니라 위치/사람 식별용 힌트입니다.
 
-### EvidenceRouter 판정 로직 (`evidence_router.py:1100~1170`)
+### 8.1 Cash Hard Gate
 
-```python
-# 1. hard-risk escalation (fire/violence 전용)
-if event_type in self.hard_tier2_events and avg_conf < self.hard_tier2_max_conf:
-    action = ACTION_GEMINI_VIDEO
-    force_tier2 = True
-    baseline_reason = f"Hard-risk escalation for {event_type}: conf={avg_conf:.2f} < {hard_tier2_max_conf:.2f}"
+cash TRUE 조건은 Gemini prompt와 parser에서 둘 다 강제합니다.
 
-# 2. 시나리오 threshold 미달 (cash: 0.55)
-elif avg_conf < scenario_threshold:
-    action = ACTION_GEMINI_VIDEO
-    force_tier2 = True
-    baseline_reason = f"Below Tier2 threshold for {event_type}: conf={avg_conf:.2f} < {scenario_threshold:.2f}"
-
-# 3. SKIP gate (고신뢰 + 고안정)
-elif avg_conf >= self.skip_confidence and stability >= self.skip_stability:
-    action = ACTION_SKIP
-    baseline_reason = f"High confidence/stability skip: conf={avg_conf:.2f}>= {skip_confidence:.2f}, stab={stability:.2f}>= {skip_stability:.2f}"
-
-# 4. Q-learning 기반 max-action + margin gate
-else:
-    action = max(ACTIONS, key=lambda x: q.get(x, -9999.0))
-    baseline_reason = f"max_q_action[{q_source}]"  # q_source = 'learned+heuristic' or 'heuristic'
-
-# 5. Margin gate: Gemini 액션이 SKIP보다 router_margin 이상 우월해야 유지
-if action in TIER2_ACTIONS and not force_tier2:
-    margin = q.get(action, 0.0) - q.get(ACTION_SKIP, 0.0)
-    if margin < self.router_margin and event_type not in hard_tier2_events:
-        action = ACTION_SKIP
-        baseline_reason = f"Margin gate: best_gemini_margin={margin:.3f} < router_margin={router_margin:.3f}"
+```text
+H1: visible Korean cash / banknotes
+H2: ownership transfer or payment movement
+H3: cashier / counter / register context
+S_STRONG: 명확한 결제/수납 증거
+no_hedging: appears / likely / maybe / probably 류 표현 없음
 ```
 
-#### 액션 공간
+KRW 지폐 색상 문맥:
 
-| 액션 | 비용 (Q-table) | 의미 |
-|------|------|-----|
-| `ACTION_SKIP` | 0.0 | Tier-2 생략, Tier-1만으로 판정 |
-| `ACTION_GEMINI_IMG` | 0.10 | 단일 프레임 Gemini 호출 (저비용) |
-| `ACTION_GEMINI_VIDEO` | 0.20 | 비디오 clip Gemini 호출 (운영 기본) |
-| `ACTION_HUMAN_QUEUE` | 0.35 | 운영자 큐로 올림 (현재 연결된 UI 없음) |
-
-#### Q-value 스코어링
-
-- `score_actions(episode, state)` — 11차원 feature vector(avg_conf, stability, prior_calls, durations, detection_count, ...) → 4개 action별 Q-value
-- Heuristic 기본값 + optional `self.policy_model` (joblib으로 로드 가능한 classifier)
-- `q_source = 'learned+heuristic'` if `policy_model else 'heuristic'`
-
-#### Critic (shadow-only, 현재 비활성)
-
-- `LightGBM` critic trainer는 `CRITIC_ENABLED=false` 기본값으로 꺼짐
-- Shadow 제거로 training 트리거 없음 → artifact 0
-
-#### 실측 영향
-
-- cash 이벤트 **92%가 conf < 0.55** → `force_tier2` 경로 (margin gate 무관)
-- SKIP 게이트(`≥ 0.85 conf ∧ ≥ 0.90 stability`)에 도달하는 경우는 거의 없음 — `p50=0.40`이라 도달 자체 어려움
-- `hard_tier2_events = {'fire', 'violence'}`, `hard_tier2_max_conf = 0.95` — 사실상 모든 fire/violence가 Tier-2로
-- Router log는 `router_steps.jsonl`에 append-only (critic training data 목적)
-
----
-
-## GPU/CPU 리소스 실측
-
-### 운영 환경 (g4dn.2xlarge, 2026-04-17 측정)
-
-| 리소스 | 스펙 | 실측 사용량 |
-|--------|-----|----------|
-| GPU | Tesla T4 15GB VRAM | **2,165 MiB / 15GB (14%)** |
-| GPU SM 활용률 | - | 평균 **65%** (45~83% 범위) |
-| GPU mem BW | - | 33~59% |
-| GPU 온도 | - | 39°C |
-| CPU | Intel Xeon 8 vCPU | user 21%, load avg 2.13/8 |
-| RAM | 30 GB | **11.6 GB (37%)** |
-| model_server 프로세스 | - | 144% CPU, RSS 9.2 GB |
-| 디스크 (data/) | - | ~10 GB |
-| 디스크 (models/) | - | 1.9 GB |
-
-### GPU 메모리 내역
-
-```
-Florence-2-large (fp16):                  ~1.5 GB
-PyTorch CUDA context + 커널 캐시:          ~0.3 GB
-Activation peaks (320 input, tok 96):      ~0.2-0.4 GB
-RTSP HW 디코딩 버퍼 (NVDEC, 카메라×2):      ~0.1 GB
-────────────────────────────────────────
-합계:                                      ~2.1 GB (15 GB 중 14%)
-여유:                                      ~13 GB
+```text
+1,000 KRW: blue
+5,000 KRW: green
+10,000 KRW: orange / red-orange
+50,000 KRW: yellow
 ```
 
-### Latency 실측 (Florence 1000 캡션)
+다음은 cash로 인정하지 않습니다.
 
-| 지표 | ms |
-|------|-----|
-| mean | 994 |
-| p50 | **1002** |
-| p90 | 1123 |
-| p99 | 1472 |
-| max | 1754 |
-| >667ms (BASE_FPS 1.5 예산) 초과 | **98.6%** |
-| >1000ms (1.0 fps 예산) 초과 | 50.8% |
-
-**결론**: `BASE_FPS=1.5`는 설정값일 뿐, 실효 처리율 **~1 fps**. GPU compute-bound 확정. `INFERENCE_WORKERS=2`는 throughput 개선 효과 없음 (이미 saturate 경계).
-
-### 직렬화 메커니즘 (3중 락)
-
-1. `GLOBAL_INFERENCE_LOCK=true` — 모든 Florence 추론 직렬
-2. `INFERENCE_WORKERS=1` — 스케줄러 워커 1개
-3. `GEMINI_MAX_CONCURRENT=1` — Tier-2 API 동시 1회
-
-### 멀티 카메라 확장 예측
-
-| 카메라 | GPU VRAM | RAM | Florence fps | 비고 |
-|-------|---------|-----|--------------|------|
-| 1 | ~2.1 GB | ~8 GB | 1.0 | 여유 충분 |
-| 2 (현재) | ~2.2 GB | ~11.6 GB | 0.5/cam (총 1.0) | compute-bound |
-| 4 | ~2.3 GB | ~15 GB | 0.25/cam (총 1.0) | 프레임 drop 심해짐 |
-| 8+ | ~2.5 GB | >15 GB | 0.125/cam | Ring buffer/디코딩 부족 |
-
-> 병목은 GPU compute (Florence 지연), 확장 전 **해상도 튜닝 또는 multi-GPU** 필요.
-
----
-
-## 핵심 컴포넌트
-
-### StreamManager (`stream_manager.py`, 683 LoC)
-
-- **Thread model**: 카메라별 전용 `_reader_loop` daemon thread + ring buffer
-- **Ring buffer**: `collections.deque(maxlen)` 각 요소는 `{"frame": np.ndarray, "mono_ts": float}` tuple
-  - `maxlen = effective_fps × buffer_seconds` (기본 `12 × 30 = 360 frames`)
-  - `mono_ts = time.monotonic()` — 시스템 시간 변경에 내성
-- **Sampling rate**:
-  - 메인 추론 샘플링: `BASE_FPS=1.5` → `BURST_FPS=4.0` (탐지 후 `BURST_DURATION_SEC=3.0`)
-  - Clip buffer 저장: `clip_buffer_fps=12.0` → `clip_buffer_burst_fps=15.0` (고해상도 clip 재현 목적)
-- **Reconnection**: 지수 백오프 `1s → 2s → 4s → 8s` + `±jitter` (OpenCV `VideoCapture` 재오픈)
-- **HW 가속** (`RTSP_HWACCEL=cuda`):
-  - FFmpeg `-hwaccel cuda -hwaccel_device 0`로 NVDEC 사용
-  - `RTSP_HWACCEL_ALLOW_FALLBACK=true`로 디코더 미지원 시 CPU로 자동 전환
-- **중복 방지** (`_rtsp_key` canonical 정규화): 동일 RTSP URL이 이미 열린 상태면 새 `start` 요청 무시 (`Assertion fctx->async_lock failed` 디코더 충돌 방지)
-- **API**: `get_frame(camera_id) → latest frame`, `get_clip_frames(camera_id, anchor_mono_ts, duration) → List[entries]`
-
-### InferenceScheduler (`inference_scheduler.py`, 211 LoC)
-
-- **Dispatcher 스레드** (`_dispatch_loop`):
-  - `dispatcher_sleep_sec = 0.02` (20ms 폴링)
-  - 각 카메라 순회, `state.running=True ∧ pending=False ∧ inflight=False`면 job 후보
-  - Target FPS: `target_fps = max(base_fps, burst_fps if active)`, `interval = 1.0 / target_fps`
-  - `now - last_submit_ts < interval`이면 skip (rate limit)
-  - `stream_manager.get_frame(camera_id)` 최신 프레임 가져와 `InferenceJob` 생성
-  - `queue.put_nowait(job)` (Full이면 `jobs_dropped++`)
-- **Worker 스레드** (`_worker_loop`, `INFERENCE_WORKERS=1`):
-  - `_queue.get(timeout=0.2)` blocking
-  - **Stale job 방어**: `state.run_id != job.run_id`이면 drop (카메라 재시작으로 이전 세션 잡 폐기)
-  - `process_fn(camera_id, frame, state, started_at)` 콜백 호출 (→ `vlm_api._run_inference_once`)
-  - `pending`/`inflight` 플래그 다음 라운드를 위해 False로 reset
-- **큐 크기**: `INFERENCE_QUEUE_SIZE=128`
-- **Runtime 상태 추적** (`_camera_runtime`): `jobs_enqueued`, `jobs_completed`, `jobs_dropped`, `last_submit_ts`, `last_finish_ts`, `last_active_ts`, `workers_alive`, `dispatcher_alive`
-- **Active burst** (`INFERENCE_ACTIVE_BURST_SEC=3.0`, `INFERENCE_ACTIVE_BURST_FPS=3.0`): `mark_camera_active()` 호출 후 3초 동안 FPS 승격
-
-### PipelineOrchestrator (`pipeline_orchestrator.py`, 644 LoC)
-
-- **`process_frame_sequential()`** — Florence 1회 + 3 시나리오 `CaptionAnalyzer.analyze()` (운영 경로, Caption Sharing)
-- **`process_frame()`** — `ThreadPoolExecutor(max_workers=3, inference_timeout=10.0s)` 병렬 경로 (미사용, legacy)
-- **Cash Dual Path** (전부 현재 OFF):
-  - `CASH_DUAL_PATH_ENABLED=false` — ROI crop + 전체 프레임 2회 추론 통합
-  - `CASH_ROI_INFER_ENABLED=false` — ROI 분리 추론
-  - `CASH_GLOBAL_ASSIST_THRESHOLD=0.30` — ROI 점수가 이 이상이면 global도 요청
-- **EVA Q2E 5-stage** 구조 (classification → decomposition → enrichment → clustering → parallel inference) — 현재 실제로 1 stage로 수행. legacy 스타일 보존.
-
-### Val_clip 유지 + 영구 clip 생성 (2026-04-17 fix)
-
-```
-1. validation clip 생성 (val_ev_{id}.mp4) — Gemini 입력용, overlay 포함(cash 시)
-2. Gemini API 호출 (video_only) — 4-6초 대기
-3. val_clip 유지 (삭제 안 함. 과거: os.remove)
-4. 영구 clip 생성:
-   - val_entries 재사용 (동일 프레임 셋) ← race 제거
-   - validation_clip_sec 로 duration 통일
-   - ev_{id}.mp4 (plain, clip_url)
-   - ev_{id}_roi.mp4 (overlay, cash에만)
-   - thumbnail.jpg
-5. Fallback: 영구 clip 생성 실패 시 event.clip_url = val_clip_path 자동 승계
+```text
+receipt
+white paper
+card
+phone
+menu
+form
+envelope
+room key
 ```
 
-결과: TP 이벤트 clip 유실 버그 해결, Gemini 본 원본과 UI 표시 영상 1:1 일치.
+Gemini가 cash hard gate를 충족하지 못하면 confidence가 높아도 `FALSE_POSITIVE`로 강제됩니다.
 
----
+### 8.2 Fire Hard Rule
 
-## Labeling UI (GT 수집)
+fire TRUE 조건:
 
-### 개요
+```text
+visible flame
+visible smoke plume
+temporally persistent smoke
+```
 
-`/monitor/labeling` — 이벤트 단위 TP/FP/Unclear 인간 라벨링.
+다음은 reject 대상입니다.
 
-누적된 라벨은:
-- 모델 정확도 A/B 측정의 근거
-- Florence/Gemini/CaptionAnalyzer 튜닝 방향 결정의 유일한 수단
-- LoRA 학습 데이터의 품질 게이트 (GT TP 30-50건 이상 필요)
+```text
+sunlight / glare / reflection
+TV / LED screen / signage
+red or orange signs
+lamps / decorative lights
+fire extinguisher without smoke/flame
+fog / steam / blur / camera artifact
+```
 
-### UI 구성 (2026-04-17 재설계)
+### 8.3 Fail-Closed
 
-**웰컴 카드** (처음 방문 시)
-- 블로킹 `prompt()` 없음. 인라인 이름 입력 + Enter 지원
-- 3단계 워크플로 설명 (영상→판정→저장)
-- TP/FP/Unclear 기준 박스 (색상 구분)
+Gemini가 꺼져 있거나 API 오류가 나면 이벤트를 TP로 올리지 않습니다.
 
-**좌측 이벤트 리스트 패널** (320px 고정, 스크롤)
-- 각 행: 시간·카메라·판정 배지(TP/FP/Unclear/unlabeled)·Gemini 배지(G:accept/G:decline)·t1 conf·"no clip" 마커
-- **클릭 → 해당 이벤트 즉시 이동**
-- N/P 키보드 네비게이션 시 active 행 자동 스크롤
-- 저장 시 배지 즉시 갱신
+```text
+Gemini disabled -> validation_error
+API error       -> validation_error
+no clip         -> validation_error
+confidence      -> 0.0
+is_detected     -> false
+```
 
-**우측 판정 패널**
-- 영상 (자동재생, 오버레이 토글)
-- Gemini 판정 참고 정보 (가리지 않고 표시)
-- TP/FP/Unclear 큰 버튼 + 키보드 `1/2/3`
-- FP 세부 유형 (폰/영수증/카드/빈 장면/직원만/전달 없음/기타)
-- 메모 (FP/Unclear는 필수)
-- 저장 & 다음 (`N`), 이전 (`P`), 스킵 (`⇧S`)
+## 9. Queue and Ring Buffer Safety
 
-**카메라 필터** — `display_name`이 있으면 `표시명 (id)` 형식으로 표시
+기존 문제는 worker queue가 밀린 뒤 clip을 뜨면 ring buffer에서 프레임이 사라질 수 있다는 점이었습니다.
 
----
+현재 정책:
 
-## UI 구성
+```text
+- 이벤트 admission 시점에 admission_clip_entries 확보
+- worker는 가능하면 admission_clip_entries를 그대로 사용
+- 같은 camera/scenario job이 이미 queue에 있으면 duplicate_pending으로 drop
+- queue full이면 dead_letter/events_dropped.jsonl에 기록
+- queue latency가 validation_clip_sec보다 길면 Gemini 검증 중단
+```
 
-### 1. CCTV Live (`/monitor/adhoc`)
+dead letter 위치:
 
-- 멀티 카메라 카드 그리드 (실시간 MJPEG)
-- 카드 클릭 → 설정 모달
-- **표시명 편집** (`display_name`) — camera_id는 readonly (내부 식별자), 표시명만 자유 편집
-- ROI zone 편집 (cashier/drawer 폴리곤)
-- Start/Stop, Full Screen, ROI Only
+```text
+data/dead_letter/events_dropped.jsonl
+```
 
-### 2. Florence 로그 (`/monitor/florence-logs`)
+## 10. GPU and Runtime Health
 
-- Tier-1 추론 결과 테이블 (카메라/시나리오/탐지여부 필터)
-- 캡션 preview + 상세 JSON 모달
-- LoRA 피드백 버튼 (accept/decline/unsure)
-- 통계: 총 행, 탐지 행, 평균 추론 시간
+silent failure를 막기 위해 다음 정책을 사용합니다.
 
-### 3. Gemini 로그 (`/monitor/gemini-logs`)
+| 상황 | 현재 정책 |
+|---|---|
+| YOLO CUDA 불가 | `ALLOW_CPU_FALLBACK=false`면 error/degraded로 기록 |
+| YOLO inference 실패 | 빈 결과로 조용히 넘기지 않고 `model_health.errors`에 기록 |
+| SigLIP load 실패 | 영구 비활성화하지 않고 exponential backoff 재시도 (5→10→…→300s) |
+| SigLIP CUDA 불가 | CPU fallback 기본 금지 |
+| Fire classifier / Action classifier load 실패 | exponential backoff 재시도, 실패 중엔 Tier-2 zero-shot만 사용 |
+| Gemini disabled/API error | TP 처리 금지, `validation_error` |
 
-- Tier-2 검증 결과 + 사유
-- 카메라 필터 (display_name 우선 표시)
-- 시나리오/결정 상태 필터
-- **미디어 strip 통일**: `clip | ROI | gemini` — overlay 유무 무관하게 라벨 고정
-- 판정 상세 모달
-- 6초 자동 갱신
+status API와 UI는 `/api/vlm/config/`의 `model_health` 필드로 runtime 상태를 확인할 수 있습니다. v3 pipeline은 `HioV3Pipeline.health()`로 `fire_classifier`/`action_classifier`의 loaded/device/failure_count를 노출합니다.
 
-### 4. Labeling (`/monitor/labeling`)
+### 10.1 CPU budget (g4dn.2xlarge 8 vCPU)
 
-위 "Labeling UI" 섹션 참조.
+| 스레드 | 예산 |
+|---|---:|
+| RTSP reader (4 cam, NVDEC) | 0.4 |
+| Frame preprocess | 0.3 |
+| Inference dispatcher + worker | 0.3 |
+| Postprocess workers (2) + overlay | 0.8 |
+| MJPEG live (3 fps cap, idle-pause) | 0.6 |
+| uvicorn × 3 (model+db+frontend, 1 worker each) | 0.5 |
+| FlushWorker + 시스템 | 0.7 |
+| **합계 (평균)** | **~3.6 vCPU / 8** |
 
-### 5. System Dashboard (`/dashboard`)
+NVDEC이 작동하지 않으면 SW 디코드로 RTSP당 ~1.5 vCPU가 더 붙습니다. 반드시 확인:
 
-- CPU/RAM/GPU/VRAM 실시간 (5초 갱신)
-- 모델 상태
-- 최근 이벤트
+```bash
+nvidia-smi --query-gpu=utilization.decoder --format=csv -l 1
+```
 
----
+`decoder > 0%`이어야 정상.
 
-## 데이터베이스 스키마
-
-### SQLite WAL — `data/cctv_events.db` (`db_server/main.py:54~167`)
-
-전체 5개 테이블 + 7개 인덱스. `PRAGMA journal_mode=WAL`로 read/write 동시성 확보.
-
-#### cameras 테이블 (2026-04-17 `display_name` 추가)
-
-| 컬럼 | 타입 | 기본값 | 설명 |
-|------|-----|------|-----|
-| `id` | INTEGER PK AUTOINCREMENT | - | 내부 PK |
-| `camera_id` | TEXT UNIQUE NOT NULL | - | 내부 식별자 (파일명·이벤트 ID에 박힘, **읽기 전용**) |
-| `rtsp_url` | TEXT NOT NULL | - | RTSP 스트림 URL (credential 포함) |
-| `base_fps` | REAL | 1.5 | 추론 샘플링 FPS |
-| `rtsp_transport` | TEXT | tcp | `tcp` / `udp` |
-| `open_timeout_ms` | INTEGER | 8000 | cv2 connect timeout |
-| `read_timeout_ms` | INTEGER | 8000 | cv2 read timeout |
-| `event_cooldown_sec` | INTEGER | 20 | 동일 시나리오 이벤트 간 최소 간격 |
-| `clip_duration_sec` | INTEGER | 10 | 영구 clip 길이 |
-| `validation_clip_sec` | INTEGER | 10 | Gemini 입력 clip 길이 (`clip_duration_sec`과 통일 권장) |
-| `evidence_mode` | TEXT | video_only | Gemini 모드 |
-| `use_video_validation` | INTEGER | 1 | 비디오 검증 활성화 플래그 |
-| `cashier_zone` | TEXT JSON | '[]' | 캐셔 존 정규화 좌표 폴리곤 `[[x,y],...]` |
-| `drawer_zone` | TEXT JSON | '[]' | 서랍 존 폴리곤 |
-| `display_name` | TEXT | '' | UI 표시 라벨 (자유 편집, 2026-04-17 추가) |
-| `created_at` / `updated_at` | TEXT | `datetime('now','localtime')` | |
-
-마이그레이션: `PRAGMA table_info(cameras)` 검사 후 `display_name` 없으면 `ALTER TABLE cameras ADD COLUMN display_name TEXT DEFAULT ''` idempotent 실행.
-
-#### events 테이블
-
-| 컬럼 | 타입 | 설명 |
-|------|-----|------|
-| `id` | INTEGER PK AUTOINCREMENT | 내부 PK |
-| `event_id` | TEXT UNIQUE NOT NULL | 이벤트 고유 ID (`ev_{ts_ms}_{scenario}_{camera_id}`) |
-| `camera_id` | TEXT | 카메라 내부 식별자 |
-| `event_type` / `scenario` | TEXT | cash / fire / violence |
-| `confidence` | REAL | Tier-1 신뢰도 (`CaptionAnalyzer` 산출) |
-| `tier` | INTEGER | 1 / 2 |
-| `is_detected` | INTEGER | 최종 탐지 여부 (0/1) |
-| `gemini_validated` | INTEGER NULLABLE | Gemini 판정 결과 (null=미호출) |
-| `gemini_confidence` | REAL NULLABLE | Gemini confidence |
-| `gemini_reason` | TEXT | reason_bullets 조인 |
-| `caption` | TEXT | Florence 원문 캡션 |
-| `matched_keywords` | TEXT JSON | (실측: 대부분 `[]`) |
-| `evidence` | TEXT | `"Keywords: ... | Objects: ... | Caption: ..."` |
-| `clip_path` | TEXT | 영구 clip 경로 |
-| `human_feedback` | TEXT JSON NULLABLE | **Labeling UI 라벨 (canonical GT)** — `{"decision":"accept|decline|unsure","note":"","labeler":"","error_type":"","created_at":"..."}` |
-| `event_data` | TEXT JSON | 전체 메타 (Tier-1/Tier-2 raw 원본, router snapshot) |
-| `created_at` | TEXT | `datetime('now','localtime')` |
-
-인덱스: `event_id`, `camera_id`, `event_type`, `created_at`
-
-> **참고**: SQLite `events` 테이블은 현재 flush_worker가 실제 쓰기 안 하는 상태. 진실의 원본은 `data/events/YYYYMMDD/*.json` (canonical GT는 JSON 파일의 `human_feedback` 필드).
-
-#### gemini_logs 테이블
-
-| 컬럼 | 타입 | 설명 |
-|------|-----|------|
-| `id` | INTEGER PK | |
-| `event_id` | TEXT UNIQUE NOT NULL | |
-| `camera_id`, `event_type` | TEXT | |
-| `gemini_state` | TEXT | validated / declined / skipped / error |
-| `gemini_validated` | INTEGER | |
-| `gemini_confidence` | REAL | |
-| `gemini_reason` | TEXT | |
-| `validation_type` | TEXT | cash / violence / fire / staff_cash_theft / none |
-| `input_mode` | TEXT | video_only / storyboard / image 등 |
-| `prompt_version` | TEXT | `evidence-v1.1` |
-| `processing_time_ms` | INTEGER | API round-trip |
-| `media_ref` | TEXT | `video:<path>` / `image:<idx>` / `packet_keyframes` |
-| `log_data` | TEXT JSON | 전체 prompt + response + packet_summary |
-| `created_at` | TEXT | |
-
-인덱스: `event_id`, `created_at`
-
-#### episode_reviews 테이블 (현재 미사용, 구조 유지)
-
-| 컬럼 | 설명 |
-|------|-----|
-| `episode_id`, `event_id`, `camera_id`, `event_type` | 식별자 |
-| `final_policy`, `is_valid_event` | 최종 정책 |
-| `review_status` | `queued` / `in_review` / `resolved` |
-| `reviewer` | 리뷰어 이름 |
-| `gemini_validated/confidence/reason` | Tier-2 결과 스냅샷 |
-| `tier1_snapshot`, `router_snapshot`, `florence_signals` | JSON snapshot |
-| `feedback_suggestion` | 큐레이션 힌트 |
-
-#### worker_leases 테이블
-
-크로스 프로세스 워커 중복 방지:
-
-| 컬럼 | 설명 |
-|------|-----|
-| `camera_id` UNIQUE | 리스 키 |
-| `instance_id` | 워커 인스턴스 식별자 |
-| `pid` | 프로세스 ID |
-| `rtsp_url` | 리스 대상 URL |
-| `acquired_at`, `last_heartbeat` | TTL 관리 |
-| `lease_ttl_sec` | 기본 60초 |
-
----
-
-## 데이터 저장 구조
-
-루트는 `MODEL_SERVER_DATA_DIR` (기본 `data/`):
+### 10.2 VRAM budget (T4 15GB)
 
 ```
+YOLO26 pose (+ batch acts)      : ~380 MB
+YOLOv26 fire                    : ~300 MB
+SigLIP base (zero-shot)         : ~400 MB
+Fire-Detection-Siglip2          : ~370 MB
+Human-Action-Recognition        : ~370 MB
+CUDA context + caches           : ~500 MB
+NVDEC buffers (4 stream)        : ~200 MB
+--------------------------------
+합계                            : ~2.5 GB / 15 GB
+```
+
+## 11. Storage and Retention
+
+`LocalStorage`는 이벤트 JSON, clips, thumbnails를 날짜별로 저장합니다.
+
+```text
 data/
-├── events/YYYYMMDD/*.json              # ★ 이벤트 JSON (canonical 진실)
-├── clips/YYYYMMDD/
-│   ├── ev_{id}_{scenario}_{cam}.mp4    # plain 영구 clip (clip_url)
-│   ├── ev_{id}_{scenario}_{cam}_roi.mp4 # overlay 영구 clip (overlay_clip_url, cash only)
-│   └── val_ev_{id}_{scenario}_{cam}.mp4 # Gemini 입력 원본 (2026-04-17부터 유지)
-├── thumbnails/YYYYMMDD/*.jpg           # 썸네일
-├── florence_logs/YYYYMMDD/{cam}.jsonl  # Florence 캡션 raw 로그
-├── lora_training/                      # LoRA 학습 데이터 (수집 중)
-│   ├── images/*.jpg
-│   ├── annotations.jsonl
-│   └── LoRa_Flourence_feedback/
-├── shadow_feedback/*.jsonl             # ★ Legacy (2026-04-17 이전), 보존
-├── critic_models/                      # Empty, 삭제 대기
-├── rule_versions/                      # Empty, 삭제 대기
-├── cctv_events.db                      # SQLite WAL
-├── media_archive/                      # DB 서버 미디어 보관
-├── recovery_logs/
-└── incident_watch/
+  events/YYYYMMDD/*.json
+  clips/YYYYMMDD/*.mp4
+  thumbnails/YYYYMMDD/*.jpg
+  dead_letter/events_dropped.jsonl
+  smoke/clips/YYYYMMDD/*
 ```
 
-### 클립 저장 경로
+human feedback이 있는 이벤트는 retention cleanup에서 보호합니다. TP/FP/unclear 라벨이 붙은 이벤트의 JSON, clip, thumbnail은 일반 보존 기간이 지나도 삭제하지 않습니다.
 
-```
-1. 카메라 RTSP → StreamManager ring buffer (numpy frames)
-2. 이벤트 발생 → event_postprocessor 큐 enqueue
-3. val_clip 생성:
-   - ring buffer에서 anchor_mono_ts 기준 10초 프레임 추출 (val_entries)
-   - cv2.VideoWriter로 임시 AVI (MJPG)
-   - FFmpeg: libx264, CRF 23, preset fast, yuv420p, +faststart → val_ev_*.mp4
-   - overlay 있으면 zone polygon을 프레임에 burn
-4. Gemini API 호출 (video_only 모드, val_ev_*.mp4 전송)
-5. 영구 clip 생성 (val_entries 재사용):
-   - ev_*.mp4 (plain, 항상 생성)
-   - ev_*_roi.mp4 (overlay, cash + zone 있을 때)
-   - thumbnail.jpg
-6. FlushWorker가 주기적으로 DB로 메타 POST
-```
+스팟 운영 시 `data/`는 별도 EBS 볼륨 (`/srv/hio-data`)에 마운트 권장. 인스턴스 교체에도 보존.
 
----
+## 12. File Structure
 
-## API 요약
-
-### Frontend Server (`:8002`)
-
-| 메서드 | 경로 | 설명 |
-|-------|-----|------|
-| GET | `/monitor/adhoc` | CCTV Live |
-| GET | `/monitor/florence-logs` | Florence 추론 로그 |
-| GET | `/monitor/gemini-logs` | Gemini 검증 로그 |
-| GET | `/monitor/labeling` | **GT 라벨링 UI** |
-| GET | `/dashboard` | 시스템 대시보드 |
-| ANY | `/api/vlm/{path}` | Model Server 프록시 |
-| GET | `/api/proxy/status` | 모델 서버 상태 |
-| GET | `/api/proxy/events` | 이벤트 목록 |
-| GET | `/api/proxy/stats` | 통계 |
-| CRUD | `/api/proxy/cameras[/{camera_id}]` | 카메라 설정 (display_name 포함) |
-| GET | `/api/proxy/system` | 시스템 메트릭 |
-
-### Model Server (`:8000`)
-
-| 메서드 | 경로 | 설명 |
-|-------|-----|------|
-| POST | `/api/vlm/start/` | RTSP 스트림 시작 |
-| POST | `/api/vlm/stop/` | 스트림 중지 |
-| GET | `/api/vlm/video/` | MJPEG 스트리밍 |
-| GET | `/api/vlm/status/` | 카메라 상태 |
-| GET | `/api/vlm/events/` | 이벤트 목록 |
-| POST | `/api/vlm/zones/` | ROI 존 설정 |
-| GET | `/api/vlm/crop/` | ROI crop 미리보기 |
-| POST | `/api/vlm/feedback/` | 인간 피드백 (human_feedback 저장) |
-
-### DB Server (`:8001`)
-
-| 메서드 | 경로 | 설명 |
-|-------|-----|------|
-| POST | `/api/flush` | 배치 이벤트 수신 (multipart) |
-| GET | `/api/events` | 페이지네이션 이벤트 |
-| GET | `/api/events/{event_id}` | 단건 조회 |
-| POST | `/api/feedback` | 피드백 저장 |
-| GET | `/api/stats` | 집계 통계 |
-| GET/POST/PUT/DELETE | `/api/cameras[/{camera_id}]` | 카메라 CRUD (`display_name` 포함) |
-
----
-
-## 환경 변수
-
-### AI 모델
-
-| 변수 | config.py 기본 | 운영 `.env` | 설명 |
-|------|-----|-----|------|
-| `FLORENCE_MODEL` | `microsoft/Florence-2-large` | 동일 | HF 캐시 `models/hf/` |
-| `FLORENCE_BACKEND` | `pytorch` | `pytorch` | `openvino` backend는 stub — PyTorch로 fallback |
-| `FLORENCE_DEVICE` | `cuda` | `cuda` | `cpu` / `auto`도 허용. `cuda` 명시인데 CUDA 없으면 RuntimeError |
-| `FLORENCE_INPUT_SIZE` | `448` | **`448`** | `cv2.resize(INTER_AREA)` → HF processor 내부 768 bilinear upscale (이중 resize) |
-| `FLORENCE_DTYPE` | `float32` | `float32` | GPU 사용 시 어댑터가 자동 `torch.float16`로 승격 |
-| `FLORENCE_MAX_TOKENS` | `512` | **`200`** | 2026-04-17 이후 96 → 200 승격 (truncation 방지) |
-| `FLORENCE_NUM_BEAMS` | `3` | **`1`** | Greedy. `do_sample=False` |
-| `FLORENCE_CAPTION_DETAIL` | `more` | **`more`** | `<MORE_DETAILED_CAPTION>` task token |
-| `FLORENCE_LOG_PERSIST` | `true` | `true` | `data/florence_logs/YYYYMMDD/{cam}.jsonl` raw 캡션 저장 |
-| `FLORENCE_LOG_DIR` | `data/florence_logs` | 동일 | |
-| `GEMINI_API_KEY` | (필수) | 설정됨 | Google AI Studio key |
-| `GEMINI_MODEL` | `gemini-2.5-flash-lite` | `gemini-3.1-flash-lite-preview` | |
-| `GEMINI_TEMPERATURE` | `0.1` | - | |
-| `GEMINI_MAX_OUTPUT_TOKENS` | `1500` | - | |
-| `GEMINI_TIMEOUT_SEC` | `30` | **`180`** | 6× 타임아웃 확장 |
-| `GEMINI_MAX_CONCURRENT` | `1` | `1` | `asyncio.BoundedSemaphore` |
-| `LORA_ENABLED` | `false` | `false` | `peft` 어댑터 로드 |
-| `LORA_DATA_COLLECTION` | `true` | `true` | 학습 데이터 수동 수집 지속 |
-| `LORA_COLLECT_NORMAL_RATIO` | `0.05` | `0.0` | 정상 프레임 샘플링 비율 |
-| `LORA_MAX_SAMPLES` | `50000` | - | |
-
-### 탐지 임계값
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `CASH_THRESHOLD` | `0.30` | Tier-1 cash 탐지 경계 (이벤트 생성 최저) |
-| `VIOLENCE_THRESHOLD` | `0.30` | |
-| `FIRE_THRESHOLD` | `0.30` | |
-| `TIER2_CASH_THRESHOLD` | **`0.55`** | 이하 → `force_tier2` Gemini 전송 |
-| `TIER2_VIOLENCE_THRESHOLD` | `0.70` | |
-| `TIER2_FIRE_THRESHOLD` | `0.60` | |
-| `SKIP_CONFIDENCE` | `0.85` | 이 이상 + 안정성 높으면 Tier-2 스킵 |
-| `SKIP_STABILITY` | `0.90` | |
-| `CASH_DUAL_PATH_ENABLED` | `false` | ROI + Global 이중 추론 |
-| `CASH_ROI_INFER_ENABLED` | `false` | ROI 분리 추론 |
-
-### 스트림/추론
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `BASE_FPS` | `1.5` | 겉보기 설정 (실효 ~1 fps, Florence latency bound) |
-| `BURST_FPS` | `4.0` | 탐지 후 |
-| `BURST_DURATION_SEC` | `3.0` | burst 지속 시간 |
-| `SINGLE_CAMERA_MODE` | `false` | 멀티카메라 vs 단일카메라 강제 |
-| `GLOBAL_INFERENCE_LOCK` | `true` | Florence 추론 직렬화 (모든 카메라 공유 lock) |
-| `INFERENCE_WORKERS` | `1` | GPU compute-bound이라 2로 늘려도 개선 없음 |
-| `INFERENCE_QUEUE_SIZE` | `128` | job queue 크기, 초과 시 drop |
-| `INFERENCE_ACTIVE_BURST_SEC` | `3.0` | mark_camera_active 후 FPS 승격 지속 시간 |
-| `INFERENCE_ACTIVE_BURST_FPS` | `3.0` | burst FPS (스케줄러 단) |
-| `RTSP_TRANSPORT` | `tcp` | `tcp`/`udp`, 기본 tcp로 안정성 우선 |
-| `RTSP_OPEN_TIMEOUT_MS` | `8000` | cv2 connect timeout |
-| `RTSP_READ_TIMEOUT_MS` | `8000` | cv2 read timeout |
-| `RTSP_HWACCEL` | `cuda` | NVDEC. `none`으로 CPU 강제 |
-| `RTSP_HWACCEL_DEVICE` | `0` | GPU 인덱스 |
-| `RTSP_HWACCEL_DECODER` | (자동) | `h264_cuvid` 등 강제 지정 가능 |
-| `RTSP_HWACCEL_ALLOW_FALLBACK` | `true` | HW 디코더 실패 시 CPU fallback |
-| `STALE_THRESHOLD_SEC` | `2.5` | 프레임 stale 판정 임계 |
-| `CLIP_BUFFER_SECONDS` | `30` | ring buffer 최대 유지 시간 (deque maxlen 계산 기준) |
-
-### 에피소드 / 라우터
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `EPISODE_MIN_DETECTIONS` | `2` | episode 시작 최소 연속 탐지 수 |
-| `EPISODE_STABILITY_THRESHOLD` | `0.65` | episode 안정성 minimum |
-| `EPISODE_COOLDOWN_SEC` | `60` | 동일 type 재시작 쿨다운 |
-| `EPISODE_MAX_PER_TYPE` | `3` | 동시 활성 episode 상한 |
-| `GEMINI_TARGET_RATIO` | `0.30` | Gemini 호출 목표 비율 |
-| `GEMINI_RATIO_PENALTY` | `0.25` | 비율 초과 시 Q-score penalty |
-| `VIDEO_CLIP_SECONDS` | `10` | Gemini 비디오 clip 길이 |
-| `CRITIC_ENABLED` | `false` | LightGBM critic 활성 |
-| `CRITIC_MIN_SAMPLES` | `30` | 최소 학습 샘플 |
-
-### 저장/플러시
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `MODEL_SERVER_DATA_DIR` | `data` | 런타임 데이터 루트 |
-| `MODEL_SERVER_MODELS_DIR` | `models` | HF 캐시 |
-| `MODEL_SERVER_LOG_DIR` | `data/logs` | |
-| `DB_PATH` | `data/cctv_events.db` | SQLite WAL |
-| `DB_SERVER_URL` | `http://localhost:8001` | flush 대상 |
-| `FLUSH_ENDPOINT` | `/api/flush` | |
-| `FLUSH_INTERVAL_SEC` | `3600` | 1시간 간격 배치 |
-| `FLUSH_MAX_RETRIES` | `3` | |
-| `LOCAL_RETENTION_DAYS` | `5` | 로컬 파일 보존 기간 |
-| `FFMPEG_PATH` | `ffmpeg` | |
-| `EVIDENCE_MODE` | `video_only` | Gemini 기본 모드 |
-| `CLIP_SAVE_MAX_CONCURRENT` | `1` | 동시 clip 저장 한도 |
-| `POSTPROCESS_WORKERS` | `1` | event_postprocessor 큐 워커 |
-| `POSTPROCESS_QUEUE_SIZE` | `128` | |
-| `USE_S3` | `false` | S3 업로드 |
-| `AWS_REGION` | `ap-northeast-2` | |
-| `ROUTER_STEPS_PATH` | `data/router_steps.jsonl` | append-only router log |
-
-### 부팅/복구
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `AUTO_RESTORE_CAMERAS_ON_BOOT` | `true` | 부팅 시 마지막 세션 카메라 자동 복원 |
-| `AUTO_RESTORE_DELAY_SEC` | `4` | 복원 시작 전 대기 |
-| `AUTO_RESTORE_DB_RETRIES` | `20` | DB 연결 재시도 횟수 |
-| `AUTO_RESTORE_DB_RETRY_SEC` | `3` | |
-| `AUTO_RESTORE_FRAME_WAIT_SEC` | `20` | 첫 프레임 기다림 |
-| `AUTO_RESTORE_BETWEEN_CAM_SEC` | `1.5` | 카메라 간격 |
-
-### 기타
-
-| 변수 | 기본 | 설명 |
-|------|-----|------|
-| `TZ` | `Asia/Seoul` | |
-| `LOG_LEVEL` | `INFO` | |
-| `LOG_FORMAT` | 표준 | `%(asctime)s [%(name)s] %(levelname)s: %(message)s` |
-
-> **제거됨 (2026-04-17)**: `SHADOW_BATCH_SIZE`, `SHADOW_PERSIST_DIR`, `SHADOW_MAX_QUEUE`, `SHADOW_DISAGREE_THRESHOLD`, `CRITIC_SHADOW_MODE`
-
----
-
-## 배포 구조
-
-### AWS g4dn.2xlarge 타겟
-
-| 리소스 | 스펙 |
-|-------|-----|
-| CPU | Intel Xeon 8 vCPU |
-| RAM | 32 GB |
-| GPU | NVIDIA Tesla T4 15 GB VRAM |
-| 스토리지 | EBS 30GB+ (gp3 권장) |
-| OS | Ubuntu 24.04 LTS |
-| CUDA | 12.1+ |
-
-### systemd 서비스
-
-```
-vlm-boot-recover.service (oneshot, 부팅 시)
-  └→ vlm-safe-recover.sh boot-start
-      ├→ vlm-db.service (worker 1, :8001)
-      ├→ vlm-model.service (worker 1, :8000, GPU)
-      └→ vlm-frontend.service (worker 2, :8002)
-
-nginx.service (:80/443 → :8002)
+```text
+hio_intelligence_stream_v3/
+  .env
+  .env.example
+  start_local.py
+  requirements.txt
+  requirements_gpu.txt                  # compatibility shim -> requirements.txt
+  README.md
+  docs/
+    FUTURE_MULTIHEAD_SIGLIP_PLAN.md    # 나중에 호텔 GT 누적 후 학습할 계획
+  deploy/
+    README.md                           # AWS g4dn.2xlarge spot setup guide
+    vlm-model.service                   # systemd unit (Restart=always, TimeoutStopSec=120)
+    vlm-db.service
+    vlm-frontend.service
+    vlm-spot-watcher.service            # IMDS poll + graceful stop
+  models/
+    yolo26s-pose.pt
+    yolo26s.pt                          # 참고용. 기본 .env에서 disable
+    yolov26_fire_detection_best.pt
+  model_server/
+    main.py
+    vlm_api.py
+    v3_pipeline.py                      # HioV3Pipeline + health()
+    event_postprocessor.py
+    local_storage.py                    # FFmpeg preset/crf env-driven
+    stream_manager.py                   # INGEST_DOWNSAMPLE_HEIGHT, NVDEC
+    config.py                           # 모든 env 플래그 중앙화
+    proposal/
+      yolo26_runner.py
+      temporal_engine.py                # violence_semantic_gate env-driven
+      semantic_filter.py                # fire_head/action_head 주입
+      episode_manager.py
+      cashier_tracker_v3.py
+      classifier_heads.py               # Fire/Action SigLIP2 fine-tuned heads
+      feedback_collector.py
+    candidates/
+      clip_builder.py                   # V3_OVERLAY_FPS_DIVISOR 반영
+    validators/
+      gemini_temporal_validator_v3.py
+    skeleton/
+      pose_features.py
+  db_server/
+    main.py
+  frontend_server/
+    main.py
+    templates/vlm_pipeline/
+      adhoc_rtsp.html
+      v3_proposal_logs.html
+      gemini_logs.html
+      labeling.html
+  tools/
+    v3_smoke_test.py
+    spot_interruption_watcher.py        # AWS IMDS poll -> systemctl stop
 ```
 
-### 보안
+## 13. Environment Variables
 
-- 8000/8001/8002 포트는 `127.0.0.1` 바인딩 (외부 접근 차단)
-- nginx만 80/443 외부 노출
-- `.env` gitignore
-- RTSP credential 로그에 노출됨 — journalctl 로그 접근 통제 필요 (알려진 이슈)
+핵심 `.env` 값:
 
-### 복구 (`vlm-safe-recover.sh`)
+```env
+# Gemini (Tier-3)
+GEMINI_API_KEY=
+GEMINI_MODEL=gemini-3.1-flash-lite-preview
+GEMINI_MAX_CONCURRENT=2
 
-| 단계 | 타임아웃 | 검증 |
-|------|---------|------|
-| vlm-db | 25초 | HTTP 200 |
-| vlm-model | 180초 | `florence_initialized=true` |
-| 카메라 자동 복원 | 150초 | 모든 카메라 `running=true` |
-| vlm-frontend | 40초 | HTTP 200 |
-| nginx + 공개 URL | 40초 | 접근 확인 |
+# v3 runtime
+HIO_V3_ENABLED=true
+HIO_V3_PIPELINE_VERSION=v3-yolo26-tier1-siglip2classifier-episode-gemini
+V3_SCENARIOS=cash,fire,violence
+ALLOW_CPU_FALLBACK=false
 
----
+# Tier-1 YOLO
+YOLO26_POSE_WEIGHTS=models/yolo26s-pose.pt
+YOLO26_DETECT_WEIGHTS=                           # empty, disabled
+YOLO26_FIRE_WEIGHTS=models/yolov26_fire_detection_best.pt
+YOLO26_CASH_WEIGHTS=
+YOLO26_DEVICE=cuda
+V3_POSE_FPS=3.0
 
-## 로컬 실행
+# Tier-2 SigLIP + classifier heads
+V3_SEMANTIC_FILTER_ENABLED=true
+V3_SEMANTIC_MODEL=google/siglip2-base-patch16-224
+V3_SEMANTIC_DEVICE=cuda
+V3_CASH_SIGLIP_CLIP_ENABLED=true
+V3_CASH_SIGLIP_CLIP_FRAMES=12
+V3_CASH_SIGLIP_CLIP_BATCH_SIZE=4
+V3_CASH_SIGLIP_CLIP_WINDOW_SEC=15
+V3_CASH_SIGLIP_CLIP_PEAK_WINDOW_SEC=5
+V3_CASH_SIGLIP_CLIP_MIN_SCORE=0.50
+V3_CASH_SIGLIP_CLIP_FRAME_POSITIVE=0.48
+V3_CASH_SIGLIP_CLIP_MIN_POSITIVE_FRAMES=2
+V3_CASH_SIGLIP_CLIP_COOLDOWN_SEC=2.0
+V3_FIRE_CLASSIFIER_ENABLED=true
+V3_FIRE_CLASSIFIER_MODEL=prithivMLmods/Fire-Detection-Siglip2
+V3_ACTION_CLASSIFIER_ENABLED=true
+V3_ACTION_CLASSIFIER_MODEL=prithivMLmods/Human-Action-Recognition
+V3_CLASSIFIER_DEVICE=cuda
 
-### 1. 가상환경/의존성
+# Thresholds
+V3_VALIDATION_CLIP_SEC=15
+V3_CASH_PREFILTER_THRESHOLD=0.45
+V3_FIRE_PREFILTER_THRESHOLD=0.35
+V3_VIOLENCE_PREFILTER_THRESHOLD=0.45
+V3_GEMINI_ALWAYS_VALIDATE=true
+V3_FIRE_SIGLIP_MIN_SCORE=0.52
+V3_FIRE_NEUTRALIZER_THRESHOLD=0.58
+V3_ACTION_FIGHT_MIN_SCORE=0.40
+V3_ACTION_NEUTRAL_DAMPEN=0.50
+
+# Tier-2 SigLIP SUPPRESSION GATE (block Gemini call if SigLIP disagrees with pose)
+V3_CASH_SIGLIP_GATE=0.30
+V3_VIOLENCE_SIGLIP_GATE=0.25
+V3_FIRE_SIGLIP_FLOOR=0.15
+
+# Skeleton overlay frames in context_overlay clip (0 = ROI only, no ghost)
+V3_OVERLAY_SKELETON_FRAMES=0
+
+# Episode & clip policy
+V3_CLIP_ARTIFACT_MODE=minimal
+V3_EPISODE_COOLDOWN_SEC=20
+V3_EPISODE_MAX_GAP_SEC=6
+
+# 4 camera spot budget (CPU 압축)
+BASE_FPS=3.0
+BURST_FPS=3.0
+INGEST_DOWNSAMPLE_HEIGHT=720
+RTSP_HWACCEL=cuda
+RTSP_HWACCEL_DECODER=h264_cuvid
+RTSP_HWACCEL_ALLOW_FALLBACK=true
+POSTPROCESS_WORKERS=2
+POSTPROCESS_QUEUE_SIZE=256
+CLIP_SAVE_MAX_CONCURRENT=1
+CLIP_BUFFER_SECONDS=20
+
+# FFmpeg (CPU-light encode)
+FFMPEG_PATH=ffmpeg
+FFMPEG_PRESET=ultrafast
+FFMPEG_CRF=23
+V3_OVERLAY_FPS_DIVISOR=1
+
+# Frontend MJPEG stable preview
+#   Keep browser preview light. Full-res 15fps can stall local monitoring.
+#   DEDUP_FRAMES keeps encode load low; IDLE_PAUSE still sends heartbeat frames.
+FRONTEND_MJPEG_FPS=3
+FRONTEND_MJPEG_BURST_FPS=12
+FRONTEND_MJPEG_QUALITY=55
+FRONTEND_MJPEG_WIDTH=854
+FRONTEND_MJPEG_DEDUP_FRAMES=true
+FRONTEND_MJPEG_IDLE_PAUSE_SEC=5
+
+# FFmpeg encoder: libx264 (CPU) | h264_nvenc (GPU, 10x faster on T4+)
+FFMPEG_ENCODER=libx264
+FFMPEG_NVENC_PRESET=p3
+FFMPEG_NVENC_CQ=28
+
+# Spot-safe flush
+FLUSH_INTERVAL_SEC=120
+LOCAL_RETENTION_DAYS=3
+```
+
+### 13.1 `/monitor/adhoc` MJPEG 안정화 메모
+
+미리보기 초가 멈췄다가 한 번에 점프하는 현상은 RTSP 원본보다 MJPEG preview 경로 부하가 먼저 의심됩니다. local full-res `15fps`, quality `70`, width `0` 조합은 frontend -> model proxy에서 JPEG encode와 browser decode 부하가 커져 지연이 누적될 수 있습니다.
+
+현재 권장값은 `FRONTEND_MJPEG_FPS=3`, `FRONTEND_MJPEG_BURST_FPS=12`, `FRONTEND_MJPEG_QUALITY=55`, `FRONTEND_MJPEG_WIDTH=854`, `FRONTEND_MJPEG_DEDUP_FRAMES=true`, `FRONTEND_MJPEG_IDLE_PAUSE_SEC=5`입니다. 동일 frame dedup 시 idle heartbeat가 끊기던 문제도 수정했으므로, 설정 변경 후 서버 재시작이 필요합니다.
+
+`GEMINI_API_KEY`는 `.env`에만 두고 문서나 코드에 커밋하지 않습니다.
+
+## 14. Setup and Run
+
+### 14.1 Windows 로컬 개발
+
+PowerShell 기준:
+
+```powershell
+cd E:\02_StayG\00_CCTV_Motion_Detection\github\hio_intelligence_stream_v3
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+`requirements_gpu.txt`는 기존 명령 호환용 shim이며, 실제 의존성은 `requirements.txt` 하나에서 관리합니다.
+
+### 14.2 HuggingFace 모델 사전 캐시 (배포 전 권장)
+
+```powershell
+.\.venv\Scripts\python.exe - <<'PY'
+from transformers import AutoImageProcessor, SiglipForImageClassification, AutoModel
+for m in [
+    "google/siglip2-base-patch16-224",
+    "prithivMLmods/Fire-Detection-Siglip2",
+    "prithivMLmods/Human-Action-Recognition",
+]:
+    AutoImageProcessor.from_pretrained(m)
+    try:
+        SiglipForImageClassification.from_pretrained(m)
+    except Exception:
+        AutoModel.from_pretrained(m)
+    print("OK", m)
+PY
+```
+
+### 14.3 통합 실행
+
+```powershell
+.\.venv\Scripts\python.exe start_local.py
+```
+
+개별 실행:
+
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn model_server.main:app --host 127.0.0.1 --port 8000 --workers 1
+.\.venv\Scripts\python.exe -m uvicorn db_server.main:app --host 127.0.0.1 --port 8001 --workers 1
+.\.venv\Scripts\python.exe -m uvicorn frontend_server.main:app --host 127.0.0.1 --port 8002 --workers 1
+```
+
+주요 URL:
+
+```text
+http://127.0.0.1:8002/dashboard
+http://127.0.0.1:8002/monitor/adhoc
+http://127.0.0.1:8002/monitor/v3-proposal-logs
+http://127.0.0.1:8002/monitor/gemini-logs
+http://127.0.0.1:8002/monitor/labeling
+http://127.0.0.1:8000/docs
+http://127.0.0.1:8001/docs
+```
+
+### 14.4 AWS g4dn.2xlarge spot 배포
+
+`deploy/README.md` 참고. systemd 4개 unit (`vlm-model`, `vlm-db`, `vlm-frontend`, `vlm-spot-watcher`)을 `/etc/systemd/system/`에 복사하고 `systemctl enable --now`.
+
+## 15. UI Workflow
+
+1. `/monitor/adhoc` 접속
+2. RTSP camera 추가
+3. cashier zone + exchange_band polygon 그리기
+4. drawer zone은 필요하면 추가
+5. `validation_clip_sec=15`, `event_cooldown_sec=20` 확인
+6. camera start
+7. `/monitor/v3-proposal-logs`에서 Tier 1/2 proposal 확인 (`siglip_fire_score`, `classifier_fighting` 등 상세 필드)
+8. `/monitor/gemini-logs`에서 Gemini 결과와 raw/context overlay 확인
+9. `/monitor/labeling`에서 TP/FP/unclear feedback 입력 (키보드 1/2/3 단축키)
+
+## 16. API Summary
+
+| Method | Path | 역할 |
+|---|---|---|
+| `POST` | `/api/vlm/start/` | RTSP camera start |
+| `POST` | `/api/vlm/stop/` | camera stop |
+| `GET` | `/api/vlm/status/` | camera runtime status |
+| `POST` | `/api/vlm/zones/` | cashier/drawer polygon 저장 |
+| `GET` | `/api/vlm/config/` | v3 runtime config (classifier head health 포함) |
+| `GET` | `/api/vlm/events/` | local events |
+| `GET` | `/api/vlm/gemini-logs/` | Gemini validation logs |
+| `GET` | `/api/vlm/v3-proposal-logs/` | proposal logs |
+| `POST` | `/api/vlm/feedback/` | human feedback 저장 |
+
+## 17. Verification
+
+컴파일:
+
+```powershell
+.\.venv\Scripts\python.exe -m compileall model_server db_server frontend_server tools
+```
+
+Smoke test:
+
+```powershell
+.\.venv\Scripts\python.exe tools\v3_smoke_test.py
+```
+
+정상 smoke output의 핵심:
+
+```json
+{
+  "pipeline_version": "v3-yolo26-tier1-siglip2classifier-episode-gemini",
+  "candidate_clip_contract": {
+    "required_present": ["context_overlay", "raw", "skeleton_json"],
+    "missing": [],
+    "forbidden_present": []
+  }
+}
+```
+
+## 18. Troubleshooting
+
+### 이벤트가 너무 많이 생김
+
+확인 순서:
+
+```text
+1. V3_EPISODE_COOLDOWN_SEC=20 확인
+2. UI event_cooldown_sec=20 확인
+3. POSTPROCESS_QUEUE_SIZE와 dropped_total 확인
+4. proposal log에서 episode.stable / episode.suppressed 확인
+5. cash threshold를 0.45보다 올릴지 검토
+```
+
+### Gemini가 clip을 못 받음
+
+확인할 key:
+
+```text
+candidate_clip_paths.raw
+candidate_clip_paths.context_overlay
+candidate_clip_paths.skeleton_json
+```
+
+`context_overlay`가 없으면 `data/clips/YYYYMMDD/` 쓰기 권한, FFmpeg, postprocess queue 상태를 확인합니다.
+
+### CUDA가 안 잡힘
+
+현재 기본은 CPU fallback 금지입니다.
+
+```powershell
+.\.venv\Scripts\python.exe - <<'PY'
+import torch
+print(torch.cuda.is_available())
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "no cuda")
+PY
+```
+
+운영에서 CPU fallback을 허용하려면 `.env`에서 명시적으로 바꿉니다.
+
+```env
+ALLOW_CPU_FALLBACK=true
+```
+
+### NVDEC 작동 안 함 (4 cam에서 vCPU 폭주)
 
 ```bash
-cd /path/to/hio_intelligence_stream
-python3 -m venv venv
-source venv/bin/activate       # Linux/Mac
-# .\venv\Scripts\Activate.ps1  # Windows
-
-# GPU (CUDA 12.1) — requirements.txt보다 먼저
-pip install --no-cache-dir -r requirements_gpu.txt
-pip install -r requirements.txt
-
-# CPU-only
-pip install -r requirements.txt
+nvidia-smi --query-gpu=utilization.decoder --format=csv -l 1
 ```
 
-### 2. 환경 파일
+`decoder 0%`면 FFmpeg가 `--enable-cuda --enable-cuvid`로 빌드됐는지 `ffmpeg -version | grep cuvid`로 확인. 미지원이면 `RTSP_HWACCEL_DECODER`를 비우거나 `h264` 로 변경해 OpenCV 기본 경로 사용.
 
-```bash
-cp .env.example .env
-# GEMINI_API_KEY=your_key
-# FLORENCE_DEVICE=cuda  (또는 cpu)
+### fire false positive가 많음
+
+확인할 metadata:
+
+```text
+local_prefilter.siglip_fire_score
+local_prefilter.siglip_neutralizer_score
+local_prefilter.classifier_fire / classifier_smoke / classifier_normal
+matched_keywords
 ```
 
-### 3. 실행
+햇빛, 화면, 간판, 조명 오탐이면:
 
-```bash
-python start_local.py          # 3서버
-python start_local.py model db # 일부
+```env
+V3_FIRE_NEUTRALIZER_THRESHOLD=0.50      # 낮춰서 neutralizer 자주 활성
+V3_FIRE_SIGLIP_MIN_SCORE=0.60           # 올려서 classifier 확신 높을 때만 통과
+V3_FIRE_PREFILTER_THRESHOLD=0.45        # 올려서 후보 자체 줄이기
 ```
 
-접속:
-- CCTV Live: http://localhost:8002/monitor/adhoc
-- Labeling: http://localhost:8002/monitor/labeling
-- Florence 로그: http://localhost:8002/monitor/florence-logs
-- Gemini 로그: http://localhost:8002/monitor/gemini-logs
-- Dashboard: http://localhost:8002/dashboard
+### violence false positive가 많음 (hugging/clapping 오탐)
 
----
+확인:
 
-## 코드 규모 (2026-04-21 실측)
-
-### LoC 분해 (19,334 lines 총)
-
-| 영역 | LoC | 주요 파일 |
-|------|-----|----------|
-| model_server (core) | 11,951 | `evidence_router.py` (1,799), `vlm_api.py` (1,784), `gemini_validator.py` (1,316), `main.py` (853), `scenarios/base_scenario.py` (775), `stream_manager.py` (683), `pipeline_orchestrator.py` (644), `local_storage.py` (602) |
-| model_server (adapters) | 798 | `florence_adapter.py` (533), `base_adapter.py` (265) |
-| model_server (scenarios) | 1,037 | `base_scenario.py` (775), `prompts.py` (235), `__init__.py` (27) |
-| model_server (lora) | 1,259 | `data_collector.py` (631), `train_lora.py` (402), `dataset.py` (226) |
-| model_server (evolution) | 528 | `rule_updater.py` (337), `critic_trainer.py` (191) — **Dead code, 제거 대기** |
-| model_server (agents) | 295 | `dynamic_agent.py` — **Dead code, 제거 대기** |
-| model_server (dead) | 302 | `base_detector.py` — **Dead code, 제거 대기** |
-| db_server | 777 | `main.py` (675), `models.py` (102 Django legacy) |
-| frontend_server | 590 | `main.py` 단일 FastAPI 파일 |
-| frontend templates | 3,422 | `adhoc_rtsp.html` (1,081), `labeling.html` (844), `gemini_logs.html` (779), `florence_logs.html` (483), `base_public.html` (235) |
-| deploy | 838 | `vlm-safe-recover.sh` (293), `setup_aws_g4dn.sh` (239), `track_disconnect_2h.sh` (125) + 4 systemd unit |
-
-### Dead code 후보 (2026-04-17 Shadow 제거 후 경로 끊김)
-
-| 파일 | LoC | 상태 | 비고 |
-|------|-----|------|-----|
-| `evolution/critic_trainer.py` | 191 | Dead | Shadow에서만 호출되던 `train()` 트리거 사라짐 |
-| `evolution/rule_updater.py` | 337 | Dead | `apply_feedback_to_rules()` 호출 경로 없음 |
-| `agents/dynamic_agent.py` | 295 | Dead | 초기화만 존재 |
-| `base_detector.py` | 302 | Dead | 정의만 존재 (YOLO `ultralytics` import는 남아있으나 호출 0) |
-| `episode_manager.py` | 421 | Dead | `main.py`에서 import 없음, throwaway Episode만 생성 |
-| `db_server/models.py` | 102 | Dead | Django ORM 스키마, SQLite WAL로 대체됨 |
-| `scenarios/prompts.py` 문자열 상수 | ~150 | Dead | `get_scenario_prompt()`는 호출되나 반환 문자열이 Florence에서 무시됨 |
-| `frontend_server/views.py` | 1 | Empty | |
-| `fix_html.py` | - | Dead | 일회성 마이그레이션 스크립트 |
-
-**제거 시 예상 LoC 감소**: ~1,800 lines (~9%).
-
----
-
-## 트러블슈팅
-
-### TP 이벤트에 clip이 없는 경우
-
-2026-04-17 fix 이전 이벤트일 수 있음. 신규 이벤트는 val_clip 유지 + race 제거로 항상 `clip_url` 존재. journalctl 에서 `Permanent clip skipped` WARNING 있으면 ring buffer 문제 가능성.
-
-### Labeling UI 진입 시 팝업만 뜨는 경우
-
-2026-04-17 재설계 이전 브라우저 캐시. 강제 새로고침 (`Ctrl+Shift+R`) 후 확인. 웰컴 카드가 보여야 정상.
-
-### 카메라 이름 바꾸기
-
-Camera ID는 고정 (파일명·이벤트 ID에 박힘). **표시명**(`display_name`)만 편집:
-1. CCTV Live → 카드 Settings 클릭 → 표시명 입력 → Save
-2. 모든 UI에서 새 이름 반영, 내부 ID는 기존 이벤트와 연속
-
-### `Assertion fctx->async_lock failed` / 시작 500
-
-동일 RTSP 중복 오픈으로 인한 디코더 충돌. `/api/vlm/start/`에서 중복 차단하지만 이미 열린 프로세스를 `Ctrl+C`로 정리 못 했을 때 발생. 서비스 재시작 필요.
-
-### Gemini 로그의 `SKIP`
-
-Tier-1 신뢰도가 충분히 높아 Tier-2를 생략한 상태. **오탐 아님**.
-
-### GPU OOM
-
-- `FLORENCE_INPUT_SIZE` 320 이하로
-- `FLORENCE_MAX_TOKENS` 96 이하
-- 카메라 수 줄이기 (Ring buffer RAM)
-
-### 모델 서버 시작이 느림
-
-최초 Florence-2 다운로드 ~1.9GB (2-5분). `setup_aws_g4dn.sh`의 `SKIP_MODEL_PRELOAD=0`으로 사전 다운로드.
-
----
-
-## 이벤트 생명주기 (End-to-End Trace)
-
-```
-[1] RTSP 프레임 캡처 (StreamManager._reader_loop)
-     │  cv2.VideoCapture(rtsp_url) + NVDEC (h264_cuvid)
-     │  frame (BGR numpy) + mono_ts = time.monotonic()
-     │  ↓ deque.append({"frame": frame, "mono_ts": mono_ts})
-     ▼
-[2] Ring buffer (deque maxlen = 360 frames ≈ 30초 × 12fps)
-
-[3] InferenceScheduler dispatcher (20ms 폴링)
-     │  state.running=True ∧ no pending/inflight
-     │  interval 경과 여부 확인 (1.0 / target_fps)
-     │  stream_manager.get_frame(camera_id) → 최신 프레임
-     │  ↓ InferenceJob 생성 + queue.put_nowait()
-     ▼
-[4] Worker (1개) ← queue.get(timeout=0.2)
-     │  run_id stale 가드 (다른 세션 잡 drop)
-     │  ↓ process_fn(camera_id, frame, state, started_at)
-     │     = vlm_api._run_inference_once
-     ▼
-[5] PipelineOrchestrator.process_frame_sequential
-     │  Florence-2 infer 1회:
-     │    preprocess_image (448×448) → PIL
-     │    AutoProcessor (내부 768 upscale)
-     │    autocast(cuda, fp16) + generate(max_tokens=200, beams=1)
-     │    post_process_generation → caption (free-form text)
-     │  ↓
-     │  CaptionAnalyzer.analyze(caption, CASH) × 3 scenarios
-     │  word-boundary regex → strong/moderate/context/negative matches
-     │  neutralizing phrases 무효화 → confidence (0-1 clamp)
-     │  ↓ (optional) florence_logs/{camera}.jsonl append (JSONL)
-     ▼
-[6] EvidenceRouter.select_action(episode, state)
-     │  1. hard-risk? (fire/violence & conf<0.95) → GEMINI_VIDEO
-     │  2. below threshold? (cash<0.55) → GEMINI_VIDEO (force_tier2)
-     │  3. high-conf+stability? (conf≥0.85, stab≥0.90) → SKIP
-     │  4. max-Q + margin gate
-     │  ↓ router_steps.jsonl append-only log
-     ▼
-[7] Event 생성 (Detection → Event)
-     │  event_id = f"ev_{int(time.time()*1000)}_{scenario}_{camera_id}"
-     │  detection metadata + Tier-1 결과 + Router 판정
-     │  ↓ event_postprocessor queue enqueue
-     ▼
-[8] EventPostProcessor (CPU, 별도 thread)
-     │
-     ├─ val_clip 생성 (Gemini 입력 원본):
-     │     ring buffer에서 anchor_mono_ts 기준 10초 frames (val_entries)
-     │     cv2.VideoWriter → 임시 AVI (MJPG)
-     │     FFmpeg: libx264 CRF23 preset fast yuv420p +faststart
-     │     cashier/drawer zone polygon overlay burn-in (cash만)
-     │     → data/clips/YYYYMMDD/val_ev_*.mp4
-     │
-     ├─ Gemini API 호출 (video_only 모드):
-     │     validate_event_evidence(packet, mode='video_only',
-     │                             video_path='val_ev_*.mp4')
-     │     prompt = DEFAULT_UNIFIED_PROMPT.replace('{event_type}', ...)
-     │     generate_content(model, contents=[prompt + video_bytes],
-     │                      config=GenerateContentConfig(temp=0.1,
-     │                        top_k=1, max_output_tokens=1500,
-     │                        response_mime_type="application/json"))
-     │     → JSON {event_policy, is_valid_event, decision,
-     │             severity_label, confidence, policy_scores,
-     │             reason_bullets, event_type_detected}
-     │     processing_time_ms 기록
-     │     _parse_new_response_format → (is_valid, conf, reason, corrected_type)
-     │     H2H correction (violence→cash 차단)
-     │
-     ├─ 영구 clip 생성 (val_entries 재사용, race 제거):
-     │     ev_{id}.mp4 (plain, clip_url)
-     │     ev_{id}_roi.mp4 (overlay, cash+zone 있을 때만)
-     │     thumbnails/{id}.jpg
-     │
-     ├─ LocalStorage:
-     │     events/YYYYMMDD/{event_id}.json (canonical)
-     │     clips/YYYYMMDD/{ev_id}.mp4 + _roi.mp4
-     │     thumbnails/YYYYMMDD/{ev_id}.jpg
-     │
-     └─ LoRA DataCollector (passive):
-          LORA_DATA_COLLECTION=true면 detection → images/ + annotations.jsonl
-     ▼
-[9] FlushWorker (1시간 간격 또는 수동 트리거)
-     │  data/events/YYYYMMDD/*.json 스캔
-     │  multipart POST /api/flush (DB Server :8001)
-     │  DB Server: SQLite INSERT OR REPLACE INTO events + gemini_logs
-     ▼
-[10] Frontend UI
-     GET /api/proxy/events → 목록
-     GET /monitor/labeling → GT 라벨링
-     POST /api/vlm/feedback → event.human_feedback 업데이트
-     (Labeling UI에서 저장한 GT는 event JSON의 human_feedback 필드에 기록)
+```text
+local_prefilter.classifier_fighting
+local_prefilter.classifier_hugging / classifier_clapping / classifier_laughing / classifier_dancing
+local_prefilter.classifier_neutral_max
 ```
 
-### 주요 타임라인 (cash 이벤트 기준 실측)
+악수·포옹을 싸움으로 보면:
 
-| 단계 | 시간 | 누적 |
-|-----|-----|-----|
-| 프레임 캡처 → ring buffer | <1ms | <1ms |
-| 스케줄러 dispatch 대기 | 0-20ms | ~10ms |
-| Florence-2 추론 (p50) | 1002ms | ~1012ms |
-| CaptionAnalyzer × 3 | <1ms | 1012ms |
-| Router + Event 생성 | <10ms | 1022ms |
-| val_clip 생성 (10초 clip + FFmpeg) | ~500-1500ms | ~2.5s |
-| Gemini API 호출 | 4000-6000ms | ~8s |
-| 영구 clip + thumbnail | ~300-800ms | ~9s |
-| Event → JSON 저장 | <50ms | ~9s |
-| FlushWorker → DB | 1시간 지연 | +3600s |
-
-**첫 이벤트 발생 → UI 가시화 latency**: 약 **9초** (Gemini 모드 video_only 기준).
-
----
-
-## 실측 기반 한계와 다음 단계
-
-### 실측 확인된 한계
-
-| 항목 | 실측 | 의미 |
-|------|-----|------|
-| Florence 캡션 cash 어휘 | **0.00%** (1000건) | Florence는 cash 직접 인식 안 함 |
-| Tier-1 matched_keywords | **186/186 빈 배열** | strong_positive 매칭 0 |
-| Cash 이벤트 triggering | "holding" 100% + "desk" 79% | soft score로 경계선 진입 |
-| Tier-1 confidence 분포 | p50 0.40, 92%가 <0.55 | 대부분 force_tier2 → Gemini 직행 |
-| Florence latency | p50 1002ms | BASE_FPS 1.5 불가능, 실효 ~1 fps |
-| Gemini accept (cash 2일치) | 2 / 186 (~1%) | FP 필터 잘 작동, recall은 미측정 |
-| Human labels | 1 / 186 | **GT 부족이 가장 큰 병목** |
-
-### Gemini 거절 사유 분포 (cash 186건, 2026-04-17 기준)
-
-| 사유 | 건수 | 비율 | Motion gating 차단 가능? |
-|-----|-----|------|------------------------|
-| `no cash` | 127 | **68.3%** | × |
-| `no physical` | 62 | 33.3% | × |
-| `no customer` (present) | 51 | **27.4%** | ✓ (빈 데스크 즉시 컷) |
-| `no exchange` | 50 | 26.9% | × |
-| `phone` | 44 | 23.7% | × |
-| `receipt` | 36 | 19.4% | × |
-| `smartphone` | 34 | 18.3% | × |
-| `no banknote` | 28 | 15.1% | × |
-| `no hand` | 1 | 0.5% | - |
-| `no drawer` | 0 | 0.0% | - |
-
-Motion gating으로 하한 27.4% (`no customer`) 즉시 차단 가능. 상한은 정적 장면 중복 (상위 3 캡션이 전체의 23.4%) 포함 시 30-40%.
-
-### 튜닝 우선순위
-
-| 우선 | 작업 | Recall 리스크 | 비용/지연 |
-|-----|------|------------|----------|
-| ★★★★★ | GT 라벨 수집 (Labeling UI 운영) | 0 | 운영 공수 (1건 10-15초, 전수 라벨링 ~30분) |
-| ★★★★★ | Gemini hard-gate 확장 (no physical/no exchange 조기 종료) | 0 | 5분, post-Gemini |
-| ★★★★★ | Motion gating (빈 데스크 차단, `no customer` 27.4% + 중복 23% 차단) | 낮음 | Gemini 호출 -27~-40%, ~150 LoC 1일 |
-| ★★★★ | Dead code 2차 제거 (`critic_trainer`, `rule_updater`, `dynamic_agent`, `base_detector`, `episode_manager`) | 0 | 유지보수성, ~1,800 LoC 감소 |
-| ★★★★ | 모니터링 자동화 (캡션 어휘 drift, conf 버킷 추적, Gemini reject 사유 분포) | 0 | 측정 도구 |
-| ★★★ | RTSP credential 로그 마스킹 (journalctl에 credential 평문 노출) | 0 | 보안 |
-| ★★★ | Florence input size 448→768 (이중 resize 완전 제거, cash 해상도 5.7×) | **중간** — "bank" 오인식이 현재 TP trigger이므로 영향 모니터링 필요 | latency +50-100%, GT 확보 후 A/B |
-| ★★ | `CASH_DUAL_PATH_ENABLED` ON | 낮음 | latency 2× (Motion gating과 세트) |
-| ★★ | Repetition penalty 추가 (`repetition_penalty=1.3, no_repeat_ngram_size=3`) | 낮음 | 30분 구현, 중복 캡션 다양화 |
-| ★ | SQLite events 테이블 flush 경로 복구 or deprecation | 0 | 현재 JSON canonical이라 긴급도 낮음 |
-| ✗ | `INFERENCE_WORKERS=2` | - | GPU compute-bound 확정 (p50 1002ms), throughput 개선 없음 |
-| ✗ | LoRA 학습 | - | GT 1/186 → 학습 데이터 부족 |
-| ✗ | Phrase grounding 단독 사용 | - | 실험 완료: hallucination (best-match localizer). GT calibration 선행 필수 |
-| ✗ | Qwen2.5-VL-3B 로컬 Tier-2 이식 | - | Gemini가 잘 작동, 로컬 Qwen은 VRAM 2.8GB + 5-15초 latency + 유지보수 부담 |
-
-### 향후 작업
-
-- Motion gating 구현 (~150 LoC, 1일)
-- 운영 대시보드 자동 리포트 (florence 어휘 drift, Gemini reject 사유 분포)
-- Dead code 제거 라운드 (`critic_trainer`, `rule_updater`, `dynamic_agent`, `base_detector`)
-- GT 30건 이상 확보 후 Florence 512px A/B
-- GT 50건 이상 확보 후 LoRA 1차 시도
-- RTSP credential 로그 마스킹 (journalctl에 credential 평문 노출)
-- SQLite events 테이블 flush 경로 복구 or deprecation 결정
-
----
-
-## Repo Hygiene
-
-`.gitignore` 제외:
-- `.env`, `venv/`, `data/`, `models/`, `scratch/`, `model_cache/`
-- `*.log`, 미디어 파일, 모델 가중치 (`.pt`, `.bin`, `.onnx`, `.safetensors`)
-- `_tests_archive/`
-
-공유용 템플릿: `.env.example`, `.env.aws`
-
----
-
-## 로컬 개발 상세 가이드
-
-### 사전 요구사항
-
-| 항목 | 필수 | 확인 |
-|------|-----|-----|
-| Python 3.10+ (권장 3.12) | ✓ | `python3 --version` |
-| FFmpeg | ✓ | `ffmpeg -version` |
-| NVIDIA GPU + CUDA | 권장 | `nvidia-smi` |
-| Gemini API Key | ✓ (Tier-2용) | [Google AI Studio](https://aistudio.google.com/) |
-| RTSP 카메라 | 테스트용 | 없어도 UI 기동 가능 |
-
-### Step-by-Step
-
-```bash
-# 1. 클론
-git clone https://github.com/WhoAmI125/hio_intelligence_stream.git
-cd hio_intelligence_stream
-
-# 2. 가상환경
-python3 -m venv venv
-source venv/bin/activate
-
-# 3. 의존성
-pip install --no-cache-dir -r requirements_gpu.txt   # GPU
-pip install -r requirements.txt
-
-# 4. 환경
-cp .env.example .env
-# GEMINI_API_KEY=your_key 설정
-# GPU 없으면 FLORENCE_DEVICE=cpu, RTSP_HWACCEL=
+```env
+V3_ACTION_NEUTRAL_DAMPEN=0.70           # neutral dampen 강하게
+V3_ACTION_FIGHT_MIN_SCORE=0.55          # semantic gate 올림
+V3_VIOLENCE_PREFILTER_THRESHOLD=0.55    # 전체 threshold 올림
 ```
 
-### CPU-only 로컬 최적화
+### cash false positive가 많음
 
-```bash
-FLORENCE_INPUT_SIZE=256     # 속도 우선
-FLORENCE_MAX_TOKENS=64
-AUTO_RESTORE_CAMERAS_ON_BOOT=false
-# GEMINI_API_KEY 비우면 Tier-2 비활성
+확인할 metadata:
+
+```text
+cashier_tracker.triggered
+cashier_tracker.cashier_count
+cashier_tracker.customer_count
+cashier_tracker.lingering_customer_count
+cash_hard_gates
 ```
 
-### 실행
+영수증/종이/카드 오탐은 Gemini hard gate에서 reject되어야 합니다. reject되지 않으면 Gemini response의 `cash_hard_gates`와 `reason_bullets`를 확인합니다.
 
-```bash
-python start_local.py
+### queue drop이 있음
+
+확인 위치:
+
+```text
+data/dead_letter/events_dropped.jsonl
 ```
 
-기동 순서:
-- `:8001` DB (즉시)
-- `:8000` Model (**최초 실행 시 Florence-2 다운로드 ~1.9GB, 2-5분**)
-- `:8002` Frontend (즉시)
+`duplicate_pending`은 같은 camera/scenario 작업이 이미 처리 중이라는 뜻입니다. `queue_full`이면 `POSTPROCESS_WORKERS`, `POSTPROCESS_QUEUE_SIZE`, Gemini latency를 같이 봐야 합니다.
 
-### 흔한 문제
+### classifier head 로드 실패
 
-| 증상 | 해결 |
-|-----|------|
-| `ModuleNotFoundError` | `pip install -r requirements.txt` 재실행 |
-| `CUDA out of memory` | `.env`에서 `FLORENCE_DEVICE=cpu` |
-| Florence 초기화 실패 | `python -c "from transformers import AutoModelForCausalLM; AutoModelForCausalLM.from_pretrained('microsoft/Florence-2-large', trust_remote_code=True)"` |
-| 포트 충돌 | `lsof -i :8000` 후 `kill -9 PID` |
-| FFmpeg 미설치 | `sudo apt install ffmpeg` / `brew install ffmpeg` |
-| RTSP 카메라 없음 | 서버는 정상 기동, 카메라 추가 안 하면 추론 미실행 |
+`/api/vlm/config/`의 `fire_classifier.loaded` 또는 `action_classifier.loaded`가 false면
+`failure_count`, `last_error`, `permanent_failure`를 확인. 주요 원인:
 
-### 코드 경로 참고
+```text
+- SentencePiece / protobuf 미설치    -> pip install sentencepiece protobuf + restart
+- HF hub 접근 실패 (네트워크)        -> 사전 캐시 (14.2)로 해결
+- CUDA OOM                          -> V3_CLASSIFIER_DEVICE=cpu로 임시 우회
+- ALLOW_CPU_FALLBACK=false 위반       -> CUDA 복구 또는 명시적으로 true
+- transformers 버전 불일치            -> SiglipForImageClassification 지원 버전 설치
+```
 
-- 데이터 경로는 상대경로 (`data/`, `models/`), 프로젝트 루트 기준 자동 생성
-- `deploy/` 내 systemd 파일에만 `/home/ubuntu/hio_intelligence_stream` 절대경로 (AWS 전용)
-- Windows 호환: `start_local.py`가 `Scripts/python.exe` / `bin/python` 자동 감지. RTSP HW 가속은 Linux NVIDIA 전용
+`permanent_failure=true`가 표시되면 `MAX_LOAD_FAILURES=8`회 연속 실패로 운영자 조치 + 재시작이 필요한 상태입니다. classifier가 죽어도 zero-shot SigLIP 경로는 계속 돌아가므로 recall은 떨어져도 TP는 여전히 잡힙니다 (graceful degrade).
 
-### 최소 하드웨어
+## 19. Implementation Notes
 
-| 모드 | CPU | RAM | GPU | 디스크 |
-|------|-----|-----|-----|-------|
-| GPU (권장) | 4코어+ | 8GB+ | CUDA 4GB VRAM | 10GB+ |
-| CPU (테스트용) | 4코어+ | 8GB+ | 불필요 | 10GB+ |
+### SigLIP은 Tier 2
 
-CPU 모드 Florence 추론 ~2-5초/프레임 (GPU 대비 ~10× 느림). 실시간엔 부적합, UI/기능 테스트엔 충분.
+SigLIP은 모든 프레임에 항상 돌지 않습니다. YOLO/pose Tier 1에서 후보가 생긴 scenario만 SigLIP으로 보강합니다. 이는 비용 문제가 아니라 GPU 병목과 latency를 줄이기 위한 구조입니다. Fire-Detection-Siglip2 / Human-Action-Recognition classifier도 같은 gate를 따릅니다.
 
----
+### Classifier permanent failure 감지
 
-## 라이선스/주의
+SigLIP / Fire classifier / Action classifier는 load 실패 시 exponential backoff (5→10→20→…→300s)로 재시도합니다. `MAX_LOAD_FAILURES=8`회 (~10분) 초과 시 `permanent_failure=true`로 표시되고 ERROR 로그 1회 발행. `/api/vlm/config/`의 각 `*_classifier.permanent_failure` 필드로 운영자가 확인 후 환경 수정 (예: `pip install sentencepiece protobuf`) + 프로세스 재시작 필요.
 
-사내/프로젝트 목적 운영 코드 문서. 실서버 적용 전 RTSP 접근권한, 개인정보/보안 정책, 저장 보존 정책 점검 필수.
+### MJPEG live preview 튜닝 (A1 / A2 / A3)
+
+- **A1 WIDTH 다운샘플**: `FRONTEND_MJPEG_WIDTH`로 미리보기만 리사이즈. YOLO ingest path는 `INGEST_DOWNSAMPLE_HEIGHT` 기준 독립. `cv2.resize`는 새 ndarray라 원본 ring buffer 안 건드림.
+- **A2 Frame dedup**: `stream_manager.get_frame()`이 같은 ndarray 참조를 돌려주면 encode/send 스킵. 정적 장면 CPU ≈ 0.
+- **A3 Burst FPS**: 감지 직후 `INFERENCE_ACTIVE_BURST_SEC` 동안 `FRONTEND_MJPEG_BURST_FPS`로 승격. 평시 3 fps 절전, 이벤트 순간 12 fps smooth.
+
+### FFmpeg encoder (libx264 vs NVENC)
+
+`FFMPEG_ENCODER=h264_nvenc`로 전환하면 NVIDIA NVENC GPU 인코더 사용. 이벤트당 ~0.9s → ~0.09s (10×), CPU -1.5 vCPU. T4 NVENC session slot 3개 제한이므로 `POSTPROCESS_WORKERS=2` + `CLIP_SAVE_MAX_CONCURRENT=1` 유지 권장.
+
+### Overlay static-cache
+
+`CandidateClipBuilder._make_context_overlay_applier()`가 skeleton/ROI primitives를 첫 프레임에서 한 번만 렌더하고 boolean mask로 이후 프레임에 copy 적용. skeleton_summary가 static이라 63프레임 × 12 persons × 17 keypoints 재그리기 대신 mask 1회 + memcpy 63회. 이벤트 burst CPU -0.25 vCPU.
+
+### Episode 1-per-emission + quiet period
+
+`EpisodeManager.update()`는 scenario 조건이 **지속되는 한** 같은 episode로 취급해 단 1회 emit합니다. `max_gap_sec=6` 이상 non-detected 프레임이 지나야 episode가 종료되고 새 episode가 형성됩니다. 즉:
+
+- 계산대에 직원이 서 있어서 cash conf=0.70이 계속 찍혀도 → 최초 1회만 emit
+- 손님이 떠나고 6초 후 다시 와서 cash trigger → 새 episode 1회 emit
+- 이전 구조(cooldown_sec 경과 시 재emit)의 "20초 metronome" 문제 해소
+
+Suppression 이유는 proposal 메타데이터의 `metadata.episode.suppressed`에서 확인:
+
+```
+same_episode_already_emitted  : 같은 episode에서 이미 한 번 emit됨
+warming_up                    : min_hits / min_duration 미달
+cooldown                      : 직전 emission 후 cooldown_sec 안 지남
+```
+
+### FP subtype labeling
+
+`/monitor/labeling`에서 decline(FP) 판정 시 7종 error_type 중 **필수** 선택:
+
+| 키 | error_type | 의미 |
+|---|---|---|
+| `Q` | `phone_or_device` | 스마트폰/기기 오인 |
+| `W` | `receipt_or_paper` | 영수증/종이 오인 |
+| `E` | `card` | 카드 오인 |
+| `R` | `empty_scene` | 빈 장면 |
+| `T` | `staff_only` | 직원만 있음 |
+| `Y` | `no_transfer` | 전달 동작 없음 |
+| `U` | `other` | 기타 |
+
+UI (`errSection.missing` 스타일 경고) + 서버 400 (`vlm_api.py /feedback/`) 양쪽에서 차단합니다. `R`은 FP 선택 시엔 error_type으로, 평시엔 overlay 토글로 동작 (context-aware binding). FP / Unclear에는 note 한 줄 이상도 필수.
+
+### Tier-2 SigLIP 게이트 (suppression)
+
+Tier-1 pose는 recall 우선이라 손목 ROI + 다중 인원이면 거의 다 candidate로 승격됩니다. SigLIP은 본래 +0.20 보너스만 더했지만 그것만으론 게이트 역할을 못 했습니다 (실제 SigLIP cash=0.028 케이스도 Tier-1 conf 0.60으로 통과 → Gemini 호출 → 비용 낭비).
+
+새 동작 (`temporal_engine._cash_result` / `_violence_result`):
+
+```
+if semantic_score > 0 and semantic_score < SIGLIP_GATE:
+    score = 0      # Tier-1 pose가 뭐라 하든 override
+    reasons += [f"siglip_<scenario>_gate<{GATE:.2f}"]
+```
+
+`local_prefilter`에 다음 필드 노출:
+
+```json
+{
+  "passed": false,
+  "score": 0.0,
+  "pre_gate_score": 0.60,
+  "siglip_cash_score": 0.028,
+  "siglip_gate_triggered": true,
+  "reasons": ["wrist_inside_cashier_zone", "handover_like_pose", "siglip_cash_gate<0.30"]
+}
+```
+
+`/monitor/gemini-logs`의 "Tier-2 (SigLIP)" 컬럼에 GATE 배지로 시각 표시.
+
+### Skeleton overlay no-ghost policy
+
+이전: `skeleton_summary`가 admission 순간 snapshot이라 63프레임 overlay clip에 같은 위치 좌표를 매번 그림. 사람 움직이면 skeleton만 고정 → 잔상.
+
+해결: 기본 `V3_OVERLAY_SKELETON_FRAMES=0` → context_overlay에 **cashier ROI 빨간 polygon만** 그림. ROI는 진짜 static이라 ghost 없음. Gemini는 raw video + ROI hint로 판단.
+
+opt-in: `V3_OVERLAY_SKELETON_FRAMES=3`으로 설정하면 첫 3프레임만 arms-only skeleton snapshot 표시 (나머지는 ROI only). 단순화된 skeleton draw:
+
+```
+ARM_KEYPOINTS = (5, 6, 7, 8, 9, 10)        # shoulder-elbow-wrist 양쪽
+ARM_LIMBS     = ((5,7),(7,9),(6,8),(8,10)) # 어깨→팔꿈치→손목 4 라인만
+- person bbox 제거
+- "SoM #N" / "LW" / "RW" 텍스트 라벨 제거
+- 손목 dot만 초록색
+```
+
+### Spot interruption flush-now 경로
+
+`tools/spot_interruption_watcher.py`가 AWS IMDS `spot/instance-action` 감지 시:
+
+1. `POST http://127.0.0.1:8000/api/vlm/flush-now/?include_today=true` 호출
+   - FlushWorker가 `get_pending_dates(include_today=True)`로 오늘 이벤트까지 DB server로 drain
+   - 단, `archive_date()`는 today에 대해 스킵 → 당일 재시작 시 남은 이벤트 계속 flush 가능
+2. `systemctl stop vlm-model vlm-db vlm-frontend` — TimeoutStopSec=120 graceful shutdown
+3. `FlushWorker.stop(final_flush=True)` — 종료 직전 한 번 더 flush
+4. grace 90초 대기 후 watcher exit (systemd가 인스턴스 교체)
+5. 새 스팟 인스턴스에서 AUTO_RESTORE_CAMERAS_ON_BOOT=true로 자동 복원
+
+### Overlay는 1개만 저장, fps는 낮춰서
+
+기본 evidence는 원본 raw clip과 하나의 context overlay입니다. overlay는 clip_fps의 1/3 속도로 샘플링해 CPU 렌더 비용을 절감합니다. Gemini는 4~5 fps overlay로도 ROI + skeleton 힌트를 충분히 받습니다.
+
+### Overlay는 증거가 아님
+
+빨간 cashier box는 거래가 일어나는 관심 영역을 표시하는 힌트입니다. Gemini prompt와 parser는 빨간 박스, skeleton line, SoM marker 자체를 사건 증거로 쓰지 않도록 제한합니다.
+
+### NVDEC + Ingest 다운샘플 필수
+
+g4dn.2xlarge 8 vCPU에서 4 camera를 돌리려면 RTSP 디코드가 반드시 NVDEC여야 합니다. 이것 하나가 안 되면 CPU 5~6 vCPU가 추가로 소모되어 8 vCPU를 초과합니다. 이미지는 720p로 다운샘플해서 overlay 렌더와 ring buffer RAM을 절반으로 줄입니다.
+
+### Feedback은 보존
+
+human feedback이 달린 이벤트는 retention cleanup에서 보호합니다. 이 데이터는 나중에 threshold 조정, prompt 회귀 분석, multi-head SigLIP 학습 (`docs/FUTURE_MULTIHEAD_SIGLIP_PLAN.md`)에 쓰입니다.
+
+### Multi-head 공유 backbone 학습은 보류
+
+Fire-Detection-Siglip2와 Human-Action-Recognition은 둘 다 `siglip2-base-patch16-224` 기반이지만 공식 체크포인트는 full fine-tune이라 backbone 가중치가 서로 다릅니다. 따라서 `image_embed` 한 번에 두 head를 돌리는 "shared backbone"은 공개 체크포인트로는 불가능. 호텔 GT 300+건이 쌓인 후 `docs/FUTURE_MULTIHEAD_SIGLIP_PLAN.md` 에 따라 학습 예정입니다.
+
+## 20. Quick Checklist
+
+```text
+[ ] .env에 GEMINI_API_KEY 설정
+[ ] models/yolo26s-pose.pt 존재
+[ ] models/yolov26_fire_detection_best.pt 존재
+[ ] YOLO26_DETECT_WEIGHTS는 비워둠 (4cam 배포)
+[ ] HF 사전 캐시 완료 (prithivMLmods/Fire-Detection-Siglip2, Human-Action-Recognition, google/siglip2-base-patch16-224)
+[ ] V3_SCENARIOS=cash,fire,violence
+[ ] V3_FIRE_CLASSIFIER_ENABLED=true
+[ ] V3_ACTION_CLASSIFIER_ENABLED=true
+[ ] V3_CLIP_ARTIFACT_MODE=minimal
+[ ] ALLOW_CPU_FALLBACK=false
+[ ] GEMINI_MAX_CONCURRENT=2
+[ ] RTSP_HWACCEL_DECODER=h264_cuvid
+[ ] INGEST_DOWNSAMPLE_HEIGHT=720
+[ ] FFMPEG_PRESET=ultrafast
+[ ] V3_OVERLAY_FPS_DIVISOR=1
+[ ] BASE_FPS=3.0
+[ ] POSTPROCESS_WORKERS=2
+[ ] FLUSH_INTERVAL_SEC=120
+[ ] Smoke test 통과
+[ ] NVDEC 작동 확인 (nvidia-smi decoder util > 0%)
+[ ] /monitor/adhoc에서 camera 4대 추가
+[ ] cashier zone + exchange_band polygon 저장
+[ ] event_cooldown_sec=20 확인
+[ ] Gemini logs에서 raw/context_overlay 확인
+[ ] labeling에서 TP/FP feedback 저장
+[ ] (스팟) systemd units + spot watcher 실행 중
+```
+
+## 21. Time / Locale Handling (KST)
+
+운영자가 모두 한국 시간 기준으로 보기 때문에, 타임스탬프와 디렉터리 버킷팅을 KST로 통일합니다.
+
+### 21.1 Why naive ISO was unreliable
+
+- 호스트의 `.env` 에 `TZ=Asia/Seoul` 이 있으나 Windows Python은 IANA tz 이름을 해석하지 못해 `datetime.now()` 가 UTC로 떨어지는 케이스가 있었습니다.
+- 그 결과 `at` 필드가 환경마다 KST naive 또는 UTC naive로 섞여 저장됐고, 같은 디렉터리(`data/events/YYYYMMDD/`) 안에 두 포맷이 공존했습니다.
+- `event_id` (`ev_<epoch_ms>_<scenario>_<camera>`) 의 epoch ms 부분은 항상 UTC ms 로 기록되므로 시각의 단일 진실 소스(SoT) 입니다.
+
+### 21.2 Backend rules
+
+- `model_server/vlm_api.py` : `KST = timezone(timedelta(hours=9))` 와 `now_kst_iso()` 헬퍼 추가. 모든 이벤트 `at`, `saved_at`, `server_time`, `server_start_time` 에 KST tz-aware ISO (`...+09:00`) 사용.
+- `model_server/local_storage.py` : `_now_kst()` 가 모든 디렉터리 strftime 과 `saved_at` 에 사용됨. 신규 이벤트는 KST 일자 디렉터리에 들어갑니다.
+- `model_server/event_postprocessor.py` : dead-letter `at` 도 KST.
+- 기존 데이터에는 UTC 버킷팅 잔재가 남아있어, 조회시 KST 일자 ↔ UTC 디렉터리 매핑 보정이 필요합니다 (아래 18.4).
+
+### 21.3 Frontend rules
+
+- 표시 / 정렬은 항상 `event_id` epoch ms 기반. 표시는 `toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })` 로 강제.
+- 폴백 파서 (`parseAt`) 는 naive ISO 를 KST(`+09:00`) 로 anchor 하고 6 자리 마이크로초를 ms 로 정규화.
+- 적용 파일: `frontend_server/templates/vlm_pipeline/gemini_logs.html`, `v3_proposal_logs.html`, `labeling.html`.
+- 날짜 드롭다운: KST 기준 "오늘"을 항상 선택지로 노출, `YYYY-MM-DD` 형식.
+
+### 21.4 KST-day query API
+
+```text
+GET /api/vlm/events/?kst_date=YYYYMMDD&limit=N
+```
+
+- `kst_date` 가 지정되면 백엔드가 다음을 수행합니다:
+  1. KST 일자 → epoch ms 윈도우 [start, end) 계산
+  2. 해당 KST 일자가 걸치는 두 UTC 버킷 (`D-1`, `D`) 을 모두 읽음
+  3. 파일명의 `ev_<ms>_` 토큰으로 윈도우를 벗어나는 파일은 디스크 read 전에 스킵
+  4. 남은 결과를 epoch 기준 desc 정렬 후 limit 만큼 반환
+- 기존 `date=YYYYMMDD` (UTC 버킷 단위) 도 그대로 동작합니다. 운영 화면은 `kst_date` 를 사용해야 사람이 보는 날짜와 결과 집합이 일치합니다.
+
+### 21.5 Performance notes (gemini-logs)
+
+- 폴링 간격 6s → 12s, 백그라운드 탭에서는 폴링 정지, 포커스 복귀 시 즉시 새로고침.
+- 동시 fetch 가드 (`_evLoading`) 로 폴링이 누적되지 않도록 함.
+- 최상단 `event_id` 가 동일하면 테이블 재렌더 스킵 (DOM 작업 절약).
+- realtime 기본 `limit` 400 → 150 (1.5s 단축). 날짜 선택 시 `limit=3000` 으로 KST 하루 전체.
+- 디렉터리당 수천 개 JSON 이 쌓여도 파일명 epoch 사전 필터로 디스크 I/O 가 KST 윈도우에 비례.
+

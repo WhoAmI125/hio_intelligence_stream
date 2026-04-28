@@ -16,7 +16,13 @@ import time
 from pathlib import Path
 
 BASE_DIR = Path(__file__).resolve().parent
-VENV_PYTHON = str(BASE_DIR / "venv" / "Scripts" / "python.exe")
+VENV_PYTHON = str(BASE_DIR / ".venv" / "Scripts" / "python.exe")
+
+if not os.path.exists(VENV_PYTHON):
+    VENV_PYTHON = str(BASE_DIR / "venv" / "Scripts" / "python.exe")
+
+if not os.path.exists(VENV_PYTHON):
+    VENV_PYTHON = str(BASE_DIR / ".venv" / "bin" / "python")
 
 if not os.path.exists(VENV_PYTHON):
     VENV_PYTHON = str(BASE_DIR / "venv" / "bin" / "python")

@@ -31,8 +31,8 @@
     transition:transform .16s ease, box-shadow .16s ease;
   }
   .cam-card:hover { transform:translateY(-2px); box-shadow:0 16px 32px rgba(12, 29, 54, 0.12); }
-  .cam-thumb { position:relative; background:#101a2d; min-height:198px; }
-  .cam-live { width:100%; height:100%; object-fit:cover; display:block; }
+  .cam-thumb { position:relative; background:#101a2d; min-height:198px; overflow:hidden; aspect-ratio:16/9; }
+  .cam-live { width:100%; height:100%; object-fit:cover; display:block; max-width:100%; max-height:100%; }
   .cam-overlay {
     position:absolute; inset:0;
     background:linear-gradient(to top, rgba(7,13,24,.72), rgba(7,13,24,.1) 40%, rgba(7,13,24,.08));
@@ -86,7 +86,17 @@
   }
   .modal-title { font-size:14px; font-weight:800; }
   .modal-body { padding:12px 14px; overflow:auto; }
-  .modal-grid { display:grid; grid-template-columns:1.75fr .95fr; gap:12px; }
+  /* 1.75fr : .95fr grid - each column capped by minmax(0, fr) so an oversized
+     MJPEG image cannot force the left column wider than its share and push
+     the right-hand settings panel off screen. */
+  .modal-grid {
+    display:grid;
+    grid-template-columns:minmax(0, 1.75fr) minmax(0, .95fr);
+    gap:12px;
+    width:100%;
+    max-width:100%;
+  }
+  .modal-grid > section { min-width:0; min-height:0; }
 
   .live-wrap {
     position:relative;
@@ -95,10 +105,12 @@
     background:#0f182a;
     user-select:none;
     aspect-ratio:16/9;
+    width:100%;
+    max-width:100%;
   }
   .live-wrap:fullscreen, .live-wrap:-webkit-full-screen { width:100vw; height:100vh; border-radius:0; }
   .live-wrap:fullscreen #setLive, .live-wrap:-webkit-full-screen #setLive { width:100%; height:100%; object-fit:contain; }
-  #setLive { width:100%; height:100%; object-fit:contain; display:block; }
+  #setLive { width:100%; height:100%; object-fit:contain; display:block; max-width:100%; max-height:100%; }
   #zoneCanvas {
     position:absolute;
     inset:0;
@@ -190,7 +202,7 @@
     <div class="modal-body">
       <div class="fields">
         <div class="field"><label for="aCamId">Camera ID</label><input id="aCamId" placeholder="adhoc_cam" /></div>
-        <div class="field"><label for="aBaseFps">Base FPS</label><input id="aBaseFps" value="1.5" /></div>
+        <div class="field"><label for="aBaseFps">Base FPS</label><input id="aBaseFps" value="3.0" /></div>
         <div class="field full"><label for="aRtsp">RTSP URL</label><input id="aRtsp" placeholder="rtsp://user:pass@host:554/..." /></div>
       </div>
       <div class="actions">
@@ -226,23 +238,25 @@
               <strong class="note">ROI Zone Edit</strong>
               <button id="btnZoneCashier" class="btn small zbtn active" type="button">Cashier</button>
               <button id="btnZoneDrawer" class="btn small zbtn" type="button">Drawer</button>
+              <button id="btnZoneExchange" class="btn small zbtn" type="button">Exchange</button>
+              <button id="btnZoneStaffWork" class="btn small zbtn" type="button">Staff Work</button>
               <button id="btnZoneUndo" class="btn small" type="button">Undo</button>
               <button id="btnZoneClear" class="btn small" type="button">Clear</button>
               <button id="btnZoneApply" class="btn small primary" type="button">Apply Zones</button>
             </div>
-            <div id="zoneMeta" class="zone-meta">cashier:0 | drawer:0</div>
+            <div id="zoneMeta" class="zone-meta">cashier:0 | drawer:0 | exchange:0 | staff:0</div>
             <div class="note">영상 위를 클릭해 점을 찍으세요. 최소 3점부터 polygon 적용됩니다.</div>
           </div>
           <div class="explain-box">
-            <div class="explain-title">ROI + Global 설명</div>
+            <div class="explain-title">v3 YOLO26 Proposal</div>
             <div id="stExplain" class="explain-text">-</div>
           </div>
           <div class="cap-box">
-            <div class="cap-title">Florence ROI Input (Cash)</div>
+            <div class="cap-title">Cash Proposal Evidence</div>
             <div id="stRoiCaption" class="cap-text">-</div>
           </div>
           <div class="cap-box">
-            <div class="cap-title">Florence Global Input</div>
+            <div class="cap-title">YOLO / Skeleton Summary</div>
             <div id="stGlobalCaption" class="cap-text">-</div>
           </div>
         </section>
@@ -268,7 +282,7 @@
             <div class="field"><label for="sReadTimeout">Read Timeout(ms)</label><input id="sReadTimeout" value="8000" /></div>
             <div class="field"><label for="sCooldown">Cooldown(sec)</label><input id="sCooldown" value="20" /></div>
             <div class="field"><label for="sClipSec">Clip(sec)</label><input id="sClipSec" value="10" /></div>
-            <div class="field"><label for="sValidationSec">Validation(sec)</label><input id="sValidationSec" value="10" /></div>
+            <div class="field"><label for="sValidationSec">Validation(sec)</label><input id="sValidationSec" value="15" /></div>
           </div>
 
           <div class="actions">
@@ -287,11 +301,13 @@
               <select id="sRoiZone">
                 <option value="cashier">cashier</option>
                 <option value="drawer">drawer</option>
+                <option value="exchange_band">exchange_band</option>
+                <option value="staff_work_zone">staff_work_zone</option>
               </select>
               <button id="btnRoiRefresh" class="btn small" type="button">Refresh</button>
             </div>
             <img id="setRoiImage" alt="roi" />
-            <div class="note">ROI는 zone 좌표가 있어야 실제 crop으로 보입니다.</div>
+            <div class="note">ROI는 zone 좌표가 있어야 실제 영역 미리보기로 보입니다.</div>
           </div>
         </section>
       </div>
@@ -308,7 +324,12 @@
     <div class="modal-body">
       <div class="roi-tools" style="margin-bottom:10px;">
         <label class="note" for="roiZone">Zone</label>
-        <select id="roiZone"><option value="cashier">cashier</option><option value="drawer">drawer</option></select>
+        <select id="roiZone">
+          <option value="cashier">cashier</option>
+          <option value="drawer">drawer</option>
+          <option value="exchange_band">exchange_band</option>
+          <option value="staff_work_zone">staff_work_zone</option>
+        </select>
         <button id="btnRoiReload" class="btn small" type="button">Refresh</button>
         <span id="roiMeta" class="note" style="margin-left:auto;">-</span>
       </div>
@@ -391,6 +412,8 @@
   const setRoiImage = document.getElementById("setRoiImage");
   const btnZoneCashier = document.getElementById("btnZoneCashier");
   const btnZoneDrawer = document.getElementById("btnZoneDrawer");
+  const btnZoneExchange = document.getElementById("btnZoneExchange");
+  const btnZoneStaffWork = document.getElementById("btnZoneStaffWork");
   const btnZoneUndo = document.getElementById("btnZoneUndo");
   const btnZoneClear = document.getElementById("btnZoneClear");
   const btnZoneApply = document.getElementById("btnZoneApply");
@@ -429,6 +452,8 @@
     return {
       cashier: normalizeZoneList(cam?.cashier_zone),
       drawer: normalizeZoneList(cam?.drawer_zone),
+      exchange: normalizeZoneList(cam?.exchange_band),
+      staffWork: normalizeZoneList(cam?.staff_work_zone),
     };
   }
 
@@ -459,6 +484,8 @@
       camera_id: camId,
       cashier_zone: normalizeZoneList(z.cashier),
       drawer_zone: normalizeZoneList(z.drawer),
+      exchange_band: normalizeZoneList(z.exchange),
+      staff_work_zone: normalizeZoneList(z.staffWork),
     };
   }
 
@@ -472,28 +499,32 @@
 
   function ensureZonePack(cameraId) {
     if (!zoneState[cameraId] || typeof zoneState[cameraId] !== "object") {
-      zoneState[cameraId] = { cashier: [], drawer: [] };
+      zoneState[cameraId] = { cashier: [], drawer: [], exchange: [], staffWork: [] };
     }
     if (!Array.isArray(zoneState[cameraId].cashier)) zoneState[cameraId].cashier = [];
     if (!Array.isArray(zoneState[cameraId].drawer)) zoneState[cameraId].drawer = [];
+    if (!Array.isArray(zoneState[cameraId].exchange)) zoneState[cameraId].exchange = [];
+    if (!Array.isArray(zoneState[cameraId].staffWork)) zoneState[cameraId].staffWork = [];
     return zoneState[cameraId];
   }
 
   function setZoneMode(mode) {
-    zoneMode = mode === "drawer" ? "drawer" : "cashier";
+    zoneMode = ["cashier", "drawer", "exchange", "staffWork"].includes(mode) ? mode : "cashier";
     btnZoneCashier.classList.toggle("active", zoneMode === "cashier");
     btnZoneDrawer.classList.toggle("active", zoneMode === "drawer");
+    btnZoneExchange.classList.toggle("active", zoneMode === "exchange");
+    btnZoneStaffWork.classList.toggle("active", zoneMode === "staffWork");
     drawZoneCanvas();
   }
 
   function zoneCountsText(cameraId) {
     const z = ensureZonePack(cameraId);
-    return `cashier:${z.cashier.length} | drawer:${z.drawer.length} | mode:${zoneMode}`;
+    return `cashier:${z.cashier.length} | drawer:${z.drawer.length} | exchange:${z.exchange.length} | staff:${z.staffWork.length} | mode:${zoneMode}`;
   }
 
   function updateZoneMeta() {
     if (!selectedCameraId) {
-      zoneMeta.textContent = "cashier:0 | drawer:0";
+      zoneMeta.textContent = "cashier:0 | drawer:0 | exchange:0 | staff:0";
       return;
     }
     zoneMeta.textContent = zoneCountsText(selectedCameraId);
@@ -559,6 +590,8 @@
     const z = ensureZonePack(selectedCameraId);
     drawPolyNorm(z.cashier, "rgba(234,179,8,0.96)", "rgba(234,179,8,0.15)", "CASHIER", 10, box);
     drawPolyNorm(z.drawer, "rgba(59,130,246,0.96)", "rgba(59,130,246,0.15)", "DRAWER", 38, box);
+    drawPolyNorm(z.exchange, "rgba(34,197,94,0.96)", "rgba(34,197,94,0.13)", "EXCHANGE", 66, box);
+    drawPolyNorm(z.staffWork, "rgba(168,85,247,0.96)", "rgba(168,85,247,0.12)", "STAFF WORK", 94, box);
   }
 
   function loadZonesIntoEditor(cameraId) {
@@ -599,24 +632,49 @@
     drawZoneCanvas();
   }
 
-  function toPixelZones(cameraId) {
+  function toPixelZones(cameraId, width = null, height = null) {
     const z = ensureZonePack(cameraId);
-    const iw = Math.max(1, setLive.naturalWidth || 1280);
-    const ih = Math.max(1, setLive.naturalHeight || 720);
+    const iw = Math.max(1, Number(width || setLive.naturalWidth || 1280));
+    const ih = Math.max(1, Number(height || setLive.naturalHeight || 720));
     const toPx = (arr) => arr.map((p) => [Math.round(p[0] * iw), Math.round(p[1] * ih)]);
-    return { cashier: toPx(z.cashier), drawer: toPx(z.drawer) };
+    return {
+      cashier: toPx(z.cashier),
+      drawer: toPx(z.drawer),
+      exchange: toPx(z.exchange),
+      staffWork: toPx(z.staffWork),
+    };
+  }
+
+  function zonePixelSizeFor(cameraId) {
+    if (selectedCameraId === cameraId && setLive.naturalWidth && setLive.naturalHeight) {
+      return { width: setLive.naturalWidth, height: setLive.naturalHeight };
+    }
+    const img = camGrid.querySelector(`.cam-card[data-camera="${CSS.escape(cameraId)}"] img.cam-live`);
+    if (img && img.naturalWidth && img.naturalHeight) {
+      return { width: img.naturalWidth, height: img.naturalHeight };
+    }
+    return null;
+  }
+
+  async function applyZonesToModelServer(cameraId) {
+    const size = zonePixelSizeFor(cameraId);
+    if (!size) return { ok: false, data: { error: "frame size unavailable" } };
+    const px = toPixelZones(cameraId, size.width, size.height);
+    const { ok, data } = await postJson("/api/vlm/zones/", {
+      camera_id: cameraId,
+      cashier_zone: px.cashier,
+      drawer_zone: px.drawer,
+      exchange_band: px.exchange,
+      staff_work_zone: px.staffWork,
+    });
+    return { ok: ok && data.success, data };
   }
 
   async function applyZonesToServer() {
     if (!selectedCameraId) return;
-    const px = toPixelZones(selectedCameraId);
-    const { ok, data } = await postJson("/api/vlm/zones/", {
-      camera_id: selectedCameraId,
-      cashier_zone: px.cashier,
-      drawer_zone: px.drawer,
-    });
-    if (!ok || !data.success) {
-      alert(`Apply zones failed: ${data.error || "unknown"}`);
+    const applied = await applyZonesToModelServer(selectedCameraId);
+    if (!applied.ok) {
+      alert(`Apply zones failed: ${applied.data?.error || "unknown"}`);
       return;
     }
     const saved = await persistCameraToServer(selectedCameraId, "PUT");
@@ -634,13 +692,13 @@
       camera_id: String(cam.camera_id || "").trim(),
       display_name: String(cam.display_name || "").trim().slice(0, 80),
       rtsp_url: String(cam.rtsp_url || "").trim(),
-      base_fps: Number(cam.base_fps || 1.5),
+      base_fps: Number(cam.base_fps || 3.0),
       rtsp_transport: String(cam.rtsp_transport || "tcp").trim() || "tcp",
       open_timeout_ms: Number(cam.open_timeout_ms || 8000),
       read_timeout_ms: Number(cam.read_timeout_ms || 8000),
       event_cooldown_sec: Number(cam.event_cooldown_sec || 20),
       clip_duration_sec: Number(cam.clip_duration_sec || 10),
-      validation_clip_sec: Number(cam.validation_clip_sec || 10),
+      validation_clip_sec: Number(cam.validation_clip_sec || 15),
       evidence_mode: String(cam.evidence_mode || "video_only"),
       use_video_validation: cam.use_video_validation !== false,
     };
@@ -766,6 +824,7 @@
       alert(`Start failed: ${data.error || "unknown"}`);
       return;
     }
+    await applyZonesToModelServer(camId).catch(() => null);
     await fetchStatus(camId);
   }
 
@@ -789,7 +848,7 @@
   function openAddModal() {
     aCamId.value = "";
     aRtsp.value = "";
-    aBaseFps.value = "1.5";
+    aBaseFps.value = "3.0";
     addModal.classList.add("open");
   }
   function closeAddModal() { addModal.classList.remove("open"); }
@@ -797,7 +856,7 @@
   async function addCamera(startAfter) {
     const camId = String(aCamId.value || "").trim();
     const rtsp = String(aRtsp.value || "").trim();
-    const baseFps = Number(aBaseFps.value || 1.5);
+    const baseFps = Number(aBaseFps.value || 3.0);
     if (!camId) return alert("Camera ID is required.");
     if (!validRtsp(rtsp)) return alert("Valid RTSP URL is required.");
 
@@ -827,13 +886,13 @@
     sCamId.value = cfg.camera_id || camId;
     sDisplayName.value = cfg.display_name || "";
     sRtsp.value = cfg.rtsp_url || "";
-    sBaseFps.value = String(cfg.base_fps ?? 1.5);
+    sBaseFps.value = String(cfg.base_fps ?? 3.0);
     sTransport.value = cfg.rtsp_transport || "tcp";
     sOpenTimeout.value = String(cfg.open_timeout_ms ?? 8000);
     sReadTimeout.value = String(cfg.read_timeout_ms ?? 8000);
     sCooldown.value = String(cfg.event_cooldown_sec ?? 20);
     sClipSec.value = String(cfg.clip_duration_sec ?? 10);
-    sValidationSec.value = String(cfg.validation_clip_sec ?? 10);
+    sValidationSec.value = String(cfg.validation_clip_sec ?? 15);
     sEvidenceMode.value = cfg.evidence_mode || "video_only";
 
     loadZonesIntoEditor(camId);
@@ -858,7 +917,7 @@
       stEvent.textContent = "-";
       stGemini.textContent = "-";
       stError.textContent = "-";
-      stExplain.textContent = "Cash는 ROI + Global을 결합하고, Fire/Violence는 Global 기반으로 판별합니다.";
+      stExplain.textContent = "v3는 YOLO26 pose tracking + fire/smoke detect, SigLIP semantic score, exchange band temporal feature로 후보를 만들고 Gemini가 full-frame temporal clip을 검증합니다.";
       stRoiCaption.textContent = "-";
       stGlobalCaption.textContent = "-";
       return;
@@ -880,9 +939,13 @@
     const lv = status.last_vlm || {};
     const results = lv.scenario_results || {};
     const lines = [];
-    lines.push(`Cash: ROI+Global fusion (zone points: ${Number(status.cashier_zone_points || 0)})`);
-    lines.push("Fire/Violence: Global frame 기반");
-    lines.push(`Tier2 Gemini: uncertainty일 때만 호출 (state=${stGemini.textContent || "-"})`);
+    lines.push(`Pipeline: ${lv.pipeline_version || status.pipeline_mode || "hio_v3_yolo26_siglip_temporal"}`);
+    lines.push(`Cash: exchange_band + wrist proximity/motion score (cashier:${Number(status.cashier_zone_points || 0)}, exchange:${Number(status.exchange_band_points || 0)}, staff:${Number(status.staff_work_zone_points || 0)})`);
+    if (lv.cash_siglip_clip && typeof lv.cash_siglip_clip === "object" && Object.keys(lv.cash_siglip_clip).length) {
+      lines.push(`Cash clip SigLIP: ${lv.cash_siglip_clip.passed ? "passed" : "not-passed"}, score=${Number(lv.cash_siglip_clip.aggregate_score || 0).toFixed(2)}, frames=${Number(lv.cash_siglip_clip.frame_count_scored || 0)}`);
+    }
+    lines.push("Fire/Violence: YOLO pose/fire tier1 -> SigLIP tier2 -> Gemini");
+    lines.push(`Gemini: v3 candidates are validated with full-frame clips after semantic/temporal prefilter (state=${stGemini.textContent || "-"})`);
     ["cash", "fire", "violence"].forEach((k) => {
       const r = results[k];
       if (!r || typeof r !== "object") return;
@@ -892,26 +955,21 @@
     });
     stExplain.textContent = lines.join("\n");
 
-    const cashRaw = String(((results.cash || {}).raw_response) || lv.cash_caption || "").trim();
-    const globalShared = String(lv.shared_caption || "").trim();
-    let roiCaption = "";
-    let globalCaption = "";
-
-    if (cashRaw.includes("[ROI]") && cashRaw.includes("[GLOBAL]")) {
-      const parts = cashRaw.split("[GLOBAL]");
-      roiCaption = parts[0].replace("[ROI]", "").trim();
-      globalCaption = (parts[1] || "").trim();
-    } else {
-      roiCaption = cashRaw;
-      globalCaption = globalShared;
-    }
-
-    if (!globalCaption) {
-      globalCaption = String(((results.violence || {}).raw_response) || ((results.fire || {}).raw_response) || "").trim();
-    }
-
-    stRoiCaption.textContent = roiCaption || "(ROI caption not available yet)";
-    stGlobalCaption.textContent = globalCaption || "(Global caption not available yet)";
+    const cash = results.cash || {};
+    const cashMeta = cash.metadata || {};
+    const yoloSummary = cashMeta.yolo_summary || {};
+    const skeletonSummary = cashMeta.skeleton_summary || {};
+    const polygonCoords = cashMeta.polygon_coords || {};
+    const localPrefilter = cashMeta.local_prefilter || {};
+    stRoiCaption.textContent = [
+      cash.raw_response || cash.evidence || "",
+      `local_prefilter=${JSON.stringify(localPrefilter)}`,
+      `polygon_coords=${JSON.stringify(polygonCoords)}`
+    ].filter(Boolean).join("\n");
+    stGlobalCaption.textContent = [
+      `yolo_summary=${JSON.stringify(yoloSummary)}`,
+      `skeleton_summary=${JSON.stringify(skeletonSummary)}`
+    ].join("\n");
   }
 
   function readSettingsConfig() {
@@ -919,13 +977,13 @@
       camera_id: selectedCameraId,
       display_name: String(sDisplayName.value || "").trim().slice(0, 80),
       rtsp_url: sRtsp.value,
-      base_fps: Number(sBaseFps.value || 1.5),
+      base_fps: Number(sBaseFps.value || 3.0),
       rtsp_transport: sTransport.value,
       open_timeout_ms: Number(sOpenTimeout.value || 8000),
       read_timeout_ms: Number(sReadTimeout.value || 8000),
       event_cooldown_sec: Number(sCooldown.value || 20),
       clip_duration_sec: Number(sClipSec.value || 10),
-      validation_clip_sec: Number(sValidationSec.value || 10),
+      validation_clip_sec: Number(sValidationSec.value || 15),
       evidence_mode: sEvidenceMode.value,
     });
   }
@@ -953,7 +1011,7 @@
     }
     const zone = sRoiZone.value || "cashier";
     setRoiImage.classList.add("show");
-    setRoiImage.src = `/api/vlm/crop/?camera_id=${encodeURIComponent(selectedCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
+    setRoiImage.src = `/api/vlm/roi-preview/?camera_id=${encodeURIComponent(selectedCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
   }
 
   async function toggleFullscreen(el) {
@@ -982,7 +1040,7 @@
     if (!roiModalCameraId) return;
     const zone = roiZone.value || "cashier";
     roiMeta.textContent = `${roiModalCameraId} | ${zone} | ${new Date().toLocaleTimeString()}`;
-    roiImage.src = `/api/vlm/crop/?camera_id=${encodeURIComponent(roiModalCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
+    roiImage.src = `/api/vlm/roi-preview/?camera_id=${encodeURIComponent(roiModalCameraId)}&zone=${encodeURIComponent(zone)}&t=${Date.now()}`;
   }
 
   function closeRoiModal() {
@@ -1029,6 +1087,8 @@
 
   btnZoneCashier.addEventListener("click", () => setZoneMode("cashier"));
   btnZoneDrawer.addEventListener("click", () => setZoneMode("drawer"));
+  btnZoneExchange.addEventListener("click", () => setZoneMode("exchange"));
+  btnZoneStaffWork.addEventListener("click", () => setZoneMode("staffWork"));
   btnZoneUndo.addEventListener("click", undoZonePoint);
   btnZoneClear.addEventListener("click", clearZonePoints);
   btnZoneApply.addEventListener("click", applyZonesToServer);

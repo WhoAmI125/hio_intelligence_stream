@@ -1,193 +1,104 @@
-# =============================================================================
-# Secrets & credentials
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Secrets / local configuration
+# ---------------------------------------------------------------------------
 .env
 .env.*
 !.env.example
 *.pem
 *.key
-*.crt
 *.p12
 *.pfx
-*.cer
+*.crt
 *.csr
 *.pub
-*.keystore
-*.jks
 id_rsa*
 id_ed25519*
-credentials.json
-credentials.*
 secrets.*
+credentials.*
 service-account*.json
 *service_account*.json
 aws-credentials*
-*secret*.yaml
-*secret*.yml
-*.htpasswd
 .aws/
 .gcloud/
 
-# =============================================================================
-# Python
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Python / tooling caches
+# ---------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
-*.egg
-*.egg-info/
-.eggs/
-build/
-dist/
-wheels/
-*.whl
+*.so
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
 .pyre/
-.pytype/
-.coverage*
+.coverage
+.coverage.*
 htmlcov/
-.ipynb_checkpoints/
-*.ipynb_backup
 .tox/
 .nox/
+.cache/
+.ipynb_checkpoints/
 
-# =============================================================================
-# Virtual environments
-# =============================================================================
-venv/
+# ---------------------------------------------------------------------------
+# Virtual environments / local package state
+# ---------------------------------------------------------------------------
 .venv/
+venv/
 env/
 ENV/
-.conda/
+pip-wheel-metadata/
+*.egg-info/
+build/
+dist/
 
-# =============================================================================
-# Node / JS (frontend 서브 프로젝트가 생길 경우 대비)
-# =============================================================================
-node_modules/
-.pnp/
-.pnp.js
-.next/
-.nuxt/
-.cache/
-.parcel-cache/
-dist-ssr/
-
-# =============================================================================
-# Runtime data & local artifacts (HiO 파이프라인 출력)
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Runtime data, databases, logs, generated evidence
+# ---------------------------------------------------------------------------
 data/
 logs/
 analysis_frames/
 media/
+clips/
 thumbnails/
 events/
-_tests_archive/
 tmp/
 tmp_*/
 tmp*/
-test_data_tier2/
 scratch/
-outputs/
-output/
-exports/
-export/
-captures/
-recordings/
-snapshots/
-screenshots/
-dumps/
-eval_output*/
-gt_output*/
-runs/
-wandb/
-mlruns/
+test_data_tier2/
+_tests_archive/
 *.db
+*.db-*
 *.sqlite
-*.sqlite3
-*.db-journal
+*.sqlite*
 *.log
-*.log.*
 *.jsonl
 *.ndjson
 
-# =============================================================================
-# Media — 클립/영상/이미지/오디오 전부 차단 (프레임·ROI·GT 포함)
-# =============================================================================
-clips/
-clip_*/
-*_clip*
-roi_*/
-frames/
-frame_*/
-# video
+# ---------------------------------------------------------------------------
+# CCTV/media artifacts
+# ---------------------------------------------------------------------------
 *.mp4
-*.avi
+*.m4v
 *.mov
+*.avi
 *.mkv
 *.webm
-*.flv
-*.wmv
-*.m4v
-*.mpg
-*.mpeg
 *.ts
-# image
+*.m3u8
 *.jpg
 *.jpeg
 *.png
-*.gif
 *.bmp
-*.tif
-*.tiff
 *.webp
-*.heic
-*.heif
-*.raw
-# audio
-*.wav
-*.mp3
-*.flac
-*.aac
-*.ogg
-*.m4a
 
-# =============================================================================
-# Datasets / binary arrays / archives
-# =============================================================================
-*.npy
-*.npz
-*.h5
-*.hdf5
-*.parquet
-*.feather
-*.arrow
-*.msgpack
-*.joblib
-*.pkl
-*.pickle
-*.zip
-*.tar
-*.tar.gz
-*.tgz
-*.tar.bz2
-*.tbz2
-*.tar.xz
-*.txz
-*.7z
-*.rar
-*.gz
-*.bz2
-*.xz
-
-# =============================================================================
-# Model / cache artifacts
-# =============================================================================
+# ---------------------------------------------------------------------------
+# ML model weights / local model caches
+# ---------------------------------------------------------------------------
 models/
 model_cache/
-.cache/
 hf_cache/
 huggingface/
 .huggingface/
@@ -202,31 +113,41 @@ torch_cache/
 *.plan
 *.ckpt
 *.safetensors
-*.tflite
+*.h5
 *.pb
-*.gguf
-*.ggml
 
-# =============================================================================
-# Local test / scratch output noise
-# =============================================================================
+# ---------------------------------------------------------------------------
+# Large datasets / archives
+# ---------------------------------------------------------------------------
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.7z
+*.rar
+*.parquet
+*.feather
+*.npy
+*.npz
+*.pkl
+*.pickle
+
+# ---------------------------------------------------------------------------
+# Local test output noise
+# ---------------------------------------------------------------------------
 test_out*.txt
 test_*results*.txt
 out*.txt
+*.tmp
 *.bak
-*.backup
-*.orig
 *.swp
-*.swo
-*~
-.resolved
-*.resolved
 
-# =============================================================================
+# ---------------------------------------------------------------------------
 # Editors / OS
-# =============================================================================
+# ---------------------------------------------------------------------------
 .vscode/
 .idea/
+.vs/
 .DS_Store
 Thumbs.db
 desktop.ini

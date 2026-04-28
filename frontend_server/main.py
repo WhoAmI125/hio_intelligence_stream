@@ -181,14 +181,14 @@ async def labeling_monitor(request: Request):
         )
 
 
-@app.get("/monitor/florence-logs", response_class=HTMLResponse)
-async def florence_logs_monitor(request: Request):
-    """Florence inference result log UI rendered via Jinja2."""
+@app.get("/monitor/v3-proposal-logs", response_class=HTMLResponse)
+async def v3_proposal_logs_monitor(request: Request):
+    """HIO v3 proposal result log UI rendered via Jinja2."""
     try:
         return templates.TemplateResponse(
             request,
-            "vlm_pipeline/florence_logs.html",
-            {"active_page": "florence"},
+            "vlm_pipeline/v3_proposal_logs.html",
+            {"active_page": "proposals"},
         )
     except Exception as e:
         logger.error(f"Template render error: {e}")
@@ -209,7 +209,7 @@ async def dashboard():
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Intelligent CCTV Dashboard</title>
+    <title>HIO v3 CCTV Dashboard</title>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; background: #0a0a1a; color: #e0e0e0; padding: 20px; }
@@ -229,7 +229,7 @@ async def dashboard():
     </style>
 </head>
 <body>
-    <h1>Intelligent CCTV System</h1>
+    <h1>HIO v3 CCTV System</h1>
     <button id="refresh-btn" onclick="loadAll()">Refresh</button>
     <div class="grid">
         <div class="card" id="model-card">
@@ -260,8 +260,8 @@ async def dashboard():
                 const agents = (d.agents_loaded || []).join(', ');
                 document.getElementById('model-card').innerHTML = `
                     <h2>Model Server</h2>
-                    <div class="stat"><span class="label">Florence</span><span class="value">${d.florence_loaded ? 'Loaded' : 'Not loaded'}</span></div>
-                    <div class="stat"><span class="label">Agents</span><span class="value">${agents}</span></div>
+                    <div class="stat"><span class="label">Tier-1 Backend</span><span class="value">${d.tier1_backend || 'unknown'}</span></div>
+                    <div class="stat"><span class="label">v3 Pipeline</span><span class="value">${d.v3_pipeline_loaded ? 'Loaded' : 'Not loaded'}</span></div>
                     <div class="stat"><span class="label">Active Streams</span><span class="value">${streams.length}</span></div>
                 `;
             } catch(e) {

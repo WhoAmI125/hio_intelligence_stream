@@ -51,6 +51,9 @@
   .err-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:6px; margin-top:8px; }
   .err-chip { border:1px solid var(--line); border-radius:8px; padding:6px 8px; font-size:12px; font-weight:700; cursor:pointer; background:#fff; color:#425a7a; text-align:center; }
   .err-chip.active { background:#1d67d7; color:#fff; border-color:#1d67d7; }
+  .err-chip .err-key { display:inline-block; margin-left:4px; padding:0 4px; font-size:10px; font-weight:800; color:#6a7fa0; background:#eef3fb; border-radius:4px; }
+  .err-chip.active .err-key { color:#1d67d7; background:#fff; }
+  #errSection.missing { padding:8px 10px; border:1px dashed #f2b3c3; border-radius:10px; background:#fdf1f5; }
 
   .note-row { margin-top:8px; display:flex; flex-direction:column; gap:4px; }
   .note-row textarea { border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; font-family:inherit; resize:vertical; min-height:60px; }
@@ -253,15 +256,15 @@
       </div>
 
       <div id="errSection" style="display:none; margin-top:12px;">
-        <div class="muted">FP 유형 선택 (선택사항)</div>
+        <div class="muted"><b>FP 유형 선택 필수</b> · 단축키 <code>Q W E R T Y U</code></div>
         <div class="err-grid">
-          <button class="err-chip" data-err="phone_or_device">폰/기기</button>
-          <button class="err-chip" data-err="receipt_or_paper">영수증/종이</button>
-          <button class="err-chip" data-err="card">카드</button>
-          <button class="err-chip" data-err="empty_scene">빈 장면</button>
-          <button class="err-chip" data-err="staff_only">직원만</button>
-          <button class="err-chip" data-err="no_transfer">전달 없음</button>
-          <button class="err-chip" data-err="other">기타</button>
+          <button class="err-chip" data-err="phone_or_device" data-key="q">폰/기기 <span class="err-key">Q</span></button>
+          <button class="err-chip" data-err="receipt_or_paper" data-key="w">영수증/종이 <span class="err-key">W</span></button>
+          <button class="err-chip" data-err="card" data-key="e">카드 <span class="err-key">E</span></button>
+          <button class="err-chip" data-err="empty_scene" data-key="r">빈 장면 <span class="err-key">R</span></button>
+          <button class="err-chip" data-err="staff_only" data-key="t">직원만 <span class="err-key">T</span></button>
+          <button class="err-chip" data-err="no_transfer" data-key="y">전달 없음 <span class="err-key">Y</span></button>
+          <button class="err-chip" data-err="other" data-key="u">기타 <span class="err-key">U</span></button>
         </div>
       </div>
 
@@ -286,9 +289,10 @@
     <span><code>1</code>TP</span>
     <span><code>2</code>FP</span>
     <span><code>3</code>Unclear</span>
+    <span><code>Q/W/E/R/T/Y/U</code>FP 유형 (FP 선택 시)</span>
     <span><code>N</code>저장 &amp; 다음</span>
     <span><code>P</code>이전</span>
-    <span><code>R</code>오버레이 토글</span>
+    <span><code>R</code>오버레이 토글 (FP 아닐 때)</span>
     <span><code>⇧S</code>스킵(저장 안 함)</span>
   </div>
 </div>
@@ -439,9 +443,10 @@
     if (scope === 'unlabeled') pool = pool.filter(ev => !isLabeled(ev));
     else if (scope === 'labeled') pool = pool.filter(isLabeled);
 
+    const tsOf = (ev) => { const d = evTs(ev); return d ? d.getTime() : 0; };
     if (order === 'random') pool = shuffle(pool);
-    else if (order === 'chrono') pool.sort((a,b) => String(a.at || '').localeCompare(String(b.at || '')));
-    else pool.sort((a,b) => String(b.at || '').localeCompare(String(a.at || '')));
+    else if (order === 'chrono') pool.sort((a,b) => tsOf(a) - tsOf(b));
+    else pool.sort((a,b) => tsOf(b) - tsOf(a));
 
     ui.queue = pool;
     ui.cursor = 0;
@@ -451,15 +456,44 @@
     renderCurrent();
   }
 
-  function fmtTimeShort(iso){
+  // Server writes `at` as naive ISO in KST. Treat it as KST (+09:00) and
+  // format the time using Asia/Seoul so the value is consistent regardless
+  // of the viewer's local timezone.
+  function parseAt(iso){
+    if (!iso) return null;
+    const s = String(iso).trim();
+    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      const d = new Date(s); return isNaN(d.getTime()) ? null : d;
+    }
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?$/);
+    if (!m) { const d = new Date(s); return isNaN(d.getTime()) ? null : d; }
+    const ms = (m[3] || '000').slice(0,3).padEnd(3,'0');
+    const d = new Date(`${m[1]}T${m[2]}.${ms}+09:00`);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  function evTs(ev){
+    if (!ev) return null;
+    const m = String(ev.event_id || '').match(/^ev_(\d{10,16})_/);
+    if (m) {
+      const ms = Number(m[1]);
+      if (Number.isFinite(ms)) return new Date(ms);
+    }
+    return parseAt(ev.at);
+  }
+  function fmtTimeShort(ev){
+    const d = (ev && typeof ev === 'object') ? evTs(ev) : parseAt(ev);
+    if (!d) return String((ev && ev.at) || ev || '').slice(0, 16);
     try {
-      const d = new Date(iso);
-      if (isNaN(d.getTime())) return String(iso || '').slice(0, 16);
+      return d.toLocaleTimeString('ko-KR', {
+        hour12: false, timeZone: 'Asia/Seoul',
+        hour: '2-digit', minute: '2-digit', second: '2-digit',
+      });
+    } catch(e) {
       const hh = String(d.getHours()).padStart(2,'0');
       const mm = String(d.getMinutes()).padStart(2,'0');
       const ss = String(d.getSeconds()).padStart(2,'0');
       return `${hh}:${mm}:${ss}`;
-    } catch(e) { return String(iso || '').slice(0, 16); }
+    }
   }
 
   function humanLabel(ev){
@@ -488,9 +522,10 @@
     const html = ui.queue.map((ev, idx) => {
       const hl = humanLabel(ev);
       const gl = geminiLabel(ev.gemini);
-      const hasClip = !!(ev.clip_url || ev.overlay_clip_url);
+      const cands = ev.candidate_clip_paths || {};
+      const hasClip = !!(ev.clip_url || ev.overlay_clip_url || cands.context_overlay || cands.raw);
       const conf = typeof ev.confidence === 'number' ? ev.confidence.toFixed(2) : '-';
-      const time = fmtTimeShort(ev.at);
+      const time = fmtTimeShort(ev);
       const cam = esc(displayNameFor(ev.camera_id));
       const badges = [
         `<span class="ev-badge ${hl.cls}">${hl.txt}</span>`,
@@ -580,8 +615,9 @@
   function applyVideoSrc(ev){
     const vid = $('clipVideo');
     const box = $('videoBox');
-    const plain = ev.clip_url || '';
-    const overlay = ev.overlay_clip_url || '';
+    const cands = ev.candidate_clip_paths || {};
+    const plain = ev.clip_url || cands.raw || '';
+    const overlay = ev.overlay_clip_url || cands.context_overlay || '';
     let url = plain;
     if (ui.overlayMode === 'overlay' && overlay) url = overlay;
     if (ui.overlayMode === 'plain' && plain) url = plain;
@@ -651,7 +687,8 @@
     }
 
     // overlay mode per blind preference + reset per event
-    setOverlayMode(ui.blind ? 'plain' : (ev.overlay_clip_url ? 'overlay' : 'plain'));
+    const cands = ev.candidate_clip_paths || {};
+    setOverlayMode(ui.blind ? 'plain' : ((ev.overlay_clip_url || cands.context_overlay) ? 'overlay' : 'plain'));
 
     // Meta
     const g = ev.gemini || {};
@@ -702,6 +739,12 @@
       $('saveMsg').textContent = 'FP/Unclear requires a short note explaining why.';
       return false;
     }
+    if (ui.decision === 'decline' && !ui.errorType){
+      $('saveMsg').textContent = 'FP 유형 선택 필수 (Q/W/E/R/T/Y/U).';
+      $('errSection').classList.add('missing');
+      return false;
+    }
+    $('errSection').classList.remove('missing');
 
     const payload = {
       event_id: ev.event_id,
@@ -771,7 +814,8 @@
   function toggleOverlay(){
     const ev = currentEvent();
     if (!ev) return;
-    if (!ev.overlay_clip_url){ $('saveMsg').textContent = 'No overlay clip for this event.'; return; }
+    const cands = ev.candidate_clip_paths || {};
+    if (!(ev.overlay_clip_url || cands.context_overlay)){ $('saveMsg').textContent = 'No overlay clip for this event.'; return; }
     setOverlayMode(ui.overlayMode === 'overlay' ? 'plain' : 'overlay');
   }
 
@@ -825,6 +869,16 @@
 
     document.addEventListener('keydown', (e) => {
       if (e.target && /input|textarea|select/i.test(e.target.tagName)) return;
+      const errVisible = $('errSection').style.display !== 'none' && ui.decision === 'decline';
+      const k = e.key.toLowerCase();
+
+      // FP subtype shortcuts (Q W E R T Y U) only active while errSection open.
+      // Takes precedence over R=overlay toggle when user is actively labeling a FP.
+      if (errVisible && 'qwertyu'.includes(k)) {
+        const chip = document.querySelector(`.err-chip[data-key="${k}"]`);
+        if (chip) { pickError(chip.dataset.err); e.preventDefault(); return; }
+      }
+
       if (e.key === '1') { pickDecision('accept'); }
       else if (e.key === '2') { pickDecision('decline'); }
       else if (e.key === '3') { pickDecision('unsure'); }

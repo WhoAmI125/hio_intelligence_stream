@@ -45,7 +45,7 @@ class EpisodeReview(models.Model):
     tier1_snapshot = models.JSONField(default=dict, blank=True)
     router_snapshot = models.JSONField(default=dict, blank=True)
     packet_summary = models.JSONField(default=dict, blank=True)
-    florence_signals = models.JSONField(default=dict, blank=True)
+    proposal_signals = models.JSONField(default=dict, blank=True)
     feedback_error_type = models.CharField(max_length=32, blank=True, default="")
     feedback_missed_focus = models.JSONField(default=list, blank=True)
     feedback_suggestion = models.TextField(blank=True, default="")

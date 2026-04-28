@@ -1,0 +1,17 @@
+[Unit]
+Description=HIO v3 AWS Spot Interruption Watcher
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/hio_intelligence_stream_v3
+ExecStart=/opt/hio_intelligence_stream_v3/.venv/bin/python tools/spot_interruption_watcher.py --units vlm-model vlm-db vlm-frontend --poll-sec 5 --grace-sec 90 --flush-url http://127.0.0.1:8000/api/vlm/flush-now/
+Restart=always
+RestartSec=15
+StandardOutput=append:/var/log/hio/spot.log
+StandardError=append:/var/log/hio/spot.err
+
+[Install]
+WantedBy=multi-user.target

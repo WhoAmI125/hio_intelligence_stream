@@ -1,22 +1,12 @@
-"""
-Centralized Configuration — Model Server settings management.
+"""Centralized HIO v3 model-server configuration."""
 
-Loads from environment variables (.env) with sensible defaults.
-All thresholds, model paths, API keys, and FPS settings live here.
-"""
+from __future__ import annotations
 
 import os
 from pathlib import Path
-from typing import Any, Dict, Optional
 
 
 def _load_dotenv_early() -> None:
-    """
-    Load .env before computing module-level settings.
-
-    This ensures environment-backed constants below (e.g. FLORENCE_DEVICE)
-    use values from project .env on first import.
-    """
     try:
         from dotenv import load_dotenv as _load
     except ImportError:
@@ -54,66 +44,125 @@ def _env_int(key: str, default: int = 0) -> int:
         return default
 
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
-BASE_DIR = Path(os.getenv(
-    "MODEL_SERVER_BASE_DIR",
-    str(Path(__file__).resolve().parent.parent)
-))
-
+BASE_DIR = Path(os.getenv("MODEL_SERVER_BASE_DIR", str(Path(__file__).resolve().parent.parent)))
 DATA_DIR = Path(os.getenv("MODEL_SERVER_DATA_DIR", str(BASE_DIR / "data")))
 LOG_DIR = Path(os.getenv("MODEL_SERVER_LOG_DIR", str(DATA_DIR / "logs")))
 MODELS_DIR = Path(os.getenv("MODEL_SERVER_MODELS_DIR", str(BASE_DIR / "models")))
 
-# ---------------------------------------------------------------------------
-# Florence-2 (Tier 1)
-# ---------------------------------------------------------------------------
+# HIO v3 model hot path
+HIO_V3_ENABLED = _env_bool("HIO_V3_ENABLED", True)
+HIO_V3_PIPELINE_VERSION = os.getenv(
+    "HIO_V3_PIPELINE_VERSION",
+    "v3-yolo26-tier1-siglip-episode-gemini",
+)
+V3_SCENARIOS = [
+    item.strip().lower()
+    for item in os.getenv("V3_SCENARIOS", "cash,fire,violence").split(",")
+    if item.strip()
+]
+YOLO26_POSE_WEIGHTS = os.getenv("YOLO26_POSE_WEIGHTS", str(MODELS_DIR / "yolo26s-pose.pt"))
+YOLO26_DETECT_WEIGHTS = os.getenv("YOLO26_DETECT_WEIGHTS", "").strip()
+YOLO26_CASH_WEIGHTS = os.getenv("YOLO26_CASH_WEIGHTS", "").strip()
+YOLO26_FIRE_WEIGHTS = os.getenv("YOLO26_FIRE_WEIGHTS", "").strip()
+YOLO26_DEVICE = os.getenv("YOLO26_DEVICE", "cuda")
+ALLOW_CPU_FALLBACK = _env_bool("ALLOW_CPU_FALLBACK", False)
+YOLO26_IMGSZ = _env_int("YOLO26_IMGSZ", 640)
+YOLO26_POSE_CONF = _env_float("YOLO26_POSE_CONF", 0.25)
+YOLO26_DETECT_CONF = _env_float("YOLO26_DETECT_CONF", 0.25)
+V3_CASH_EPISODE_WINDOW_SEC = _env_float("V3_CASH_EPISODE_WINDOW_SEC", 5.0)
+V3_CASH_MIN_HITS = _env_int("V3_CASH_MIN_HITS", 2)
+V3_CASH_EXCHANGE_MARGIN_PX = _env_float("V3_CASH_EXCHANGE_MARGIN_PX", 90.0)
+V3_CASH_WRIST_PROXIMITY_PX = _env_float("V3_CASH_WRIST_PROXIMITY_PX", 170.0)
 
-FLORENCE_MODEL = os.getenv("FLORENCE_MODEL", "microsoft/Florence-2-large")
-FLORENCE_BACKEND = os.getenv("FLORENCE_BACKEND", "pytorch")  # pytorch | openvino
-FLORENCE_DEVICE = os.getenv("FLORENCE_DEVICE", "cuda")       # auto | cpu | cuda
-FLORENCE_INPUT_SIZE = _env_int("FLORENCE_INPUT_SIZE", 448)
-FLORENCE_DTYPE = os.getenv("FLORENCE_DTYPE", "float32")      # float32 | float16
-FLORENCE_MAX_TOKENS = _env_int("FLORENCE_MAX_TOKENS", 512)
-FLORENCE_NUM_BEAMS = _env_int("FLORENCE_NUM_BEAMS", 3)
-FLORENCE_CAPTION_DETAIL = os.getenv("FLORENCE_CAPTION_DETAIL", "more").strip().lower()
+V3_POSE_FPS = _env_float("V3_POSE_FPS", 3.0)
+V3_DETECT_FPS = _env_float("V3_DETECT_FPS", 1.5)
+V3_VALIDATION_CLIP_SEC = _env_float("V3_VALIDATION_CLIP_SEC", 15.0)
+V3_CASH_PREFILTER_THRESHOLD = _env_float("V3_CASH_PREFILTER_THRESHOLD", 0.45)
+V3_FIRE_PREFILTER_THRESHOLD = _env_float("V3_FIRE_PREFILTER_THRESHOLD", 0.35)
+V3_VIOLENCE_PREFILTER_THRESHOLD = _env_float("V3_VIOLENCE_PREFILTER_THRESHOLD", 0.45)
+V3_GEMINI_ALWAYS_VALIDATE = _env_bool("V3_GEMINI_ALWAYS_VALIDATE", True)
+V3_SEMANTIC_FILTER_ENABLED = _env_bool("V3_SEMANTIC_FILTER_ENABLED", True)
+V3_SEMANTIC_MODEL = os.getenv("V3_SEMANTIC_MODEL", "google/siglip-base-patch16-224")
+V3_SEMANTIC_DEVICE = os.getenv("V3_SEMANTIC_DEVICE", YOLO26_DEVICE)
+V3_CASH_SIGLIP_CLIP_ENABLED = _env_bool("V3_CASH_SIGLIP_CLIP_ENABLED", True)
+V3_CASH_SIGLIP_CLIP_FRAMES = _env_int("V3_CASH_SIGLIP_CLIP_FRAMES", 12)
+V3_CASH_SIGLIP_CLIP_BATCH_SIZE = _env_int("V3_CASH_SIGLIP_CLIP_BATCH_SIZE", 4)
+V3_CASH_SIGLIP_CLIP_WINDOW_SEC = _env_float("V3_CASH_SIGLIP_CLIP_WINDOW_SEC", 15.0)
+V3_CASH_SIGLIP_CLIP_PEAK_WINDOW_SEC = _env_float("V3_CASH_SIGLIP_CLIP_PEAK_WINDOW_SEC", 5.0)
+V3_CASH_SIGLIP_CLIP_MIN_SCORE = _env_float("V3_CASH_SIGLIP_CLIP_MIN_SCORE", 0.50)
+V3_CASH_SIGLIP_CLIP_FRAME_POSITIVE = _env_float("V3_CASH_SIGLIP_CLIP_FRAME_POSITIVE", 0.48)
+V3_CASH_SIGLIP_CLIP_MIN_POSITIVE_FRAMES = _env_int("V3_CASH_SIGLIP_CLIP_MIN_POSITIVE_FRAMES", 2)
+V3_CASH_SIGLIP_CLIP_COOLDOWN_SEC = _env_float("V3_CASH_SIGLIP_CLIP_COOLDOWN_SEC", 2.0)
+V3_FIRE_SIGLIP_MIN_SCORE = _env_float("V3_FIRE_SIGLIP_MIN_SCORE", 0.52)
+V3_FIRE_NEUTRALIZER_THRESHOLD = _env_float("V3_FIRE_NEUTRALIZER_THRESHOLD", 0.58)
 
-# ---------------------------------------------------------------------------
-# Gemini (Tier 2)
-# ---------------------------------------------------------------------------
+# Tier-2 SigLIP GATE: if SigLIP semantic score for the scenario is BELOW the
+# gate threshold, the Tier-1 pose/object signal is suppressed (not just no
+# bonus). This prevents wasting Gemini calls when SigLIP strongly disagrees
+# with pose (e.g. no cashier visible, no fight happening).
+V3_CASH_SIGLIP_GATE = _env_float("V3_CASH_SIGLIP_GATE", 0.30)
+V3_VIOLENCE_SIGLIP_GATE = _env_float("V3_VIOLENCE_SIGLIP_GATE", 0.25)
+V3_FIRE_SIGLIP_FLOOR = _env_float("V3_FIRE_SIGLIP_FLOOR", 0.15)
 
+# Tier-2 fine-tuned SigLIP2 classifier heads (Apache 2.0 open weights)
+V3_FIRE_CLASSIFIER_ENABLED = _env_bool("V3_FIRE_CLASSIFIER_ENABLED", True)
+V3_FIRE_CLASSIFIER_MODEL = os.getenv(
+    "V3_FIRE_CLASSIFIER_MODEL", "prithivMLmods/Fire-Detection-Siglip2"
+)
+V3_ACTION_CLASSIFIER_ENABLED = _env_bool("V3_ACTION_CLASSIFIER_ENABLED", True)
+V3_ACTION_CLASSIFIER_MODEL = os.getenv(
+    "V3_ACTION_CLASSIFIER_MODEL", "prithivMLmods/Human-Action-Recognition"
+)
+V3_CLASSIFIER_DEVICE = os.getenv("V3_CLASSIFIER_DEVICE", YOLO26_DEVICE)
+V3_ACTION_FIGHT_MIN_SCORE = _env_float("V3_ACTION_FIGHT_MIN_SCORE", 0.40)
+V3_ACTION_NEUTRAL_DAMPEN = _env_float("V3_ACTION_NEUTRAL_DAMPEN", 0.50)
+
+V3_CLIP_ARTIFACT_MODE = os.getenv("V3_CLIP_ARTIFACT_MODE", "minimal").strip().lower()
+V3_EPISODE_COOLDOWN_SEC = _env_float("V3_EPISODE_COOLDOWN_SEC", 20.0)
+V3_EPISODE_MAX_GAP_SEC = _env_float("V3_EPISODE_MAX_GAP_SEC", 6.0)
+
+# CPU-saving knobs
+INGEST_DOWNSAMPLE_HEIGHT = _env_int("INGEST_DOWNSAMPLE_HEIGHT", 720)
+V3_OVERLAY_FPS_DIVISOR = _env_int("V3_OVERLAY_FPS_DIVISOR", 3)
+# Skeleton overlay on clip:
+#   0  (default)  = NO skeleton on any frame — clip shows raw video + cashier ROI
+#                   polygon only. No ghost because ROI is truly static.
+#   N (>0)        = skeleton drawn on first N frames of overlay clip, then ROI
+#                   only. Use if operator needs to see pose snapshot at trigger.
+# Set to >0 only if needed; cashier ROI + raw video is enough for Gemini to judge.
+V3_OVERLAY_SKELETON_FRAMES = _env_int("V3_OVERLAY_SKELETON_FRAMES", 0)
+FFMPEG_PRESET = os.getenv("FFMPEG_PRESET", "ultrafast").strip()
+FFMPEG_CRF = _env_int("FFMPEG_CRF", 28)
+# Encoder: "libx264" (CPU, ubiquitous), "h264_nvenc" (NVIDIA GPU, 10x faster),
+#          or "auto" to probe for nvenc and fall back to libx264.
+FFMPEG_ENCODER = os.getenv("FFMPEG_ENCODER", "libx264").strip().lower()
+FFMPEG_NVENC_PRESET = os.getenv("FFMPEG_NVENC_PRESET", "p3").strip()
+FFMPEG_NVENC_CQ = _env_int("FFMPEG_NVENC_CQ", 28)
+
+# Frontend MJPEG live preview throttle (reduces idle CPU)
+# - FPS: base streaming fps when no active event on camera
+# - BURST_FPS: bumped fps for INFERENCE_ACTIVE_BURST_SEC after a detection,
+#              so live viewer sees smooth motion when it actually matters.
+#              Defaults to FPS (no bump) unless explicitly set.
+# - WIDTH: downscale MJPEG frames to this width (0 = keep source resolution).
+#          YOLO ingest path is unaffected; downscale is MJPEG-only.
+# - QUALITY: JPEG quality 10..95
+FRONTEND_MJPEG_FPS = _env_float("FRONTEND_MJPEG_FPS", 3.0)
+FRONTEND_MJPEG_BURST_FPS = _env_float("FRONTEND_MJPEG_BURST_FPS", 0.0)
+FRONTEND_MJPEG_QUALITY = _env_int("FRONTEND_MJPEG_QUALITY", 50)
+FRONTEND_MJPEG_WIDTH = _env_int("FRONTEND_MJPEG_WIDTH", 0)
+FRONTEND_MJPEG_IDLE_PAUSE_SEC = _env_float("FRONTEND_MJPEG_IDLE_PAUSE_SEC", 5.0)
+FRONTEND_MJPEG_DEDUP_FRAMES = _env_bool("FRONTEND_MJPEG_DEDUP_FRAMES", True)
+
+# Gemini temporal validator
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite")
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite-preview")
 GEMINI_TEMPERATURE = _env_float("GEMINI_TEMPERATURE", 0.1)
 GEMINI_MAX_OUTPUT_TOKENS = _env_int("GEMINI_MAX_OUTPUT_TOKENS", 1500)
-GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 30.0)
-GEMINI_MAX_CONCURRENT = _env_int("GEMINI_MAX_CONCURRENT", 1)
+GEMINI_TIMEOUT_SEC = _env_float("GEMINI_TIMEOUT_SEC", 90.0)
+GEMINI_MAX_CONCURRENT = _env_int("GEMINI_MAX_CONCURRENT", 2)
 
-# ---------------------------------------------------------------------------
-# Detection Thresholds
-# ---------------------------------------------------------------------------
-
-CASH_THRESHOLD = _env_float("CASH_THRESHOLD", 0.30)
-VIOLENCE_THRESHOLD = _env_float("VIOLENCE_THRESHOLD", 0.30)
-FIRE_THRESHOLD = _env_float("FIRE_THRESHOLD", 0.30)
-CASH_DUAL_PATH_ENABLED = _env_bool("CASH_DUAL_PATH_ENABLED", True)
-CASH_ROI_INFER_ENABLED = _env_bool("CASH_ROI_INFER_ENABLED", True)
-
-# Uncertainty Gate — tier2 escalation thresholds
-TIER2_FIRE_THRESHOLD = _env_float("TIER2_FIRE_THRESHOLD", 0.60)
-TIER2_VIOLENCE_THRESHOLD = _env_float("TIER2_VIOLENCE_THRESHOLD", 0.70)
-TIER2_CASH_THRESHOLD = _env_float("TIER2_CASH_THRESHOLD", 0.40)
-
-# Confidence + stability thresholds to skip Tier2
-SKIP_CONFIDENCE = _env_float("SKIP_CONFIDENCE", 0.90)
-SKIP_STABILITY = _env_float("SKIP_STABILITY", 0.90)
-
-# ---------------------------------------------------------------------------
-# Stream Sampling (RTSP)
-# ---------------------------------------------------------------------------
-
+# RTSP and scheduling
 BASE_FPS = _env_float("BASE_FPS", 1.5)
 BURST_FPS = _env_float("BURST_FPS", 4.0)
 BURST_DURATION_SEC = _env_float("BURST_DURATION_SEC", 3.0)
@@ -132,72 +181,20 @@ RTSP_HWACCEL_DECODER = os.getenv("RTSP_HWACCEL_DECODER", "").strip()
 RTSP_HWACCEL_ALLOW_FALLBACK = _env_bool("RTSP_HWACCEL_ALLOW_FALLBACK", True)
 STALE_THRESHOLD_SEC = _env_float("STALE_THRESHOLD_SEC", 2.5)
 CLIP_BUFFER_SECONDS = _env_int("CLIP_BUFFER_SECONDS", 30)
-
-# ---------------------------------------------------------------------------
-# Episode Manager
-# ---------------------------------------------------------------------------
-
-EPISODE_MIN_DETECTIONS = _env_int("EPISODE_MIN_DETECTIONS", 2)
-EPISODE_STABILITY_THRESHOLD = _env_float("EPISODE_STABILITY_THRESHOLD", 0.65)
-EPISODE_COOLDOWN_SEC = _env_int("EPISODE_COOLDOWN_SEC", 60)
-EPISODE_MAX_PER_TYPE = _env_int("EPISODE_MAX_PER_TYPE", 3)
-
-# ---------------------------------------------------------------------------
-# Evidence Router
-# ---------------------------------------------------------------------------
-
-GEMINI_TARGET_RATIO = _env_float("GEMINI_TARGET_RATIO", 0.30)
-GEMINI_RATIO_PENALTY = _env_float("GEMINI_RATIO_PENALTY", 0.25)
 VIDEO_CLIP_SECONDS = _env_int("VIDEO_CLIP_SECONDS", 10)
 EVIDENCE_MODE = os.getenv("EVIDENCE_MODE", "video_only")
 
-# ---------------------------------------------------------------------------
-# Critic / Evolution
-# ---------------------------------------------------------------------------
-
-CRITIC_ENABLED = _env_bool("CRITIC_ENABLED", False)
-CRITIC_MODEL_DIR = str(DATA_DIR / "critic_models")
-CRITIC_MIN_SAMPLES = _env_int("CRITIC_MIN_SAMPLES", 30)
-
-# Rule Updater
-RULE_PROMPTS_DIR = os.getenv("RULE_PROMPTS_DIR", "")
-if not RULE_PROMPTS_DIR:
-    RULE_PROMPTS_DIR = str(Path(__file__).resolve().parent / "agents" / "prompts")
-RULE_VERSIONS_DIR = str(DATA_DIR / "rule_versions")
-
-# ---------------------------------------------------------------------------
-# LoRA Fine-tuning
-# ---------------------------------------------------------------------------
-
-LORA_ENABLED = _env_bool("LORA_ENABLED", False)
-LORA_ADAPTER_PATH = os.getenv("LORA_ADAPTER_PATH", str(DATA_DIR / "lora_output"))
-LORA_DATA_COLLECTION = _env_bool("LORA_DATA_COLLECTION", True)
-LORA_COLLECT_NORMAL_RATIO = _env_float("LORA_COLLECT_NORMAL_RATIO", 0.05)
-LORA_DATA_DIR = os.getenv("LORA_DATA_DIR", str(DATA_DIR / "lora_training"))
-LORA_MAX_SAMPLES = _env_int("LORA_MAX_SAMPLES", 50000)
-
-# ---------------------------------------------------------------------------
-# Flush Worker (Model -> DB Server)
-# ---------------------------------------------------------------------------
-
+# Persistence
 DB_SERVER_URL = os.getenv("DB_SERVER_URL", "http://localhost:8001")
 FLUSH_ENDPOINT = os.getenv("FLUSH_ENDPOINT", "/api/flush")
-FLUSH_INTERVAL_SEC = _env_int("FLUSH_INTERVAL_SEC", 3600)
+FLUSH_INTERVAL_SEC = _env_int("FLUSH_INTERVAL_SEC", 120)
 FLUSH_MAX_RETRIES = _env_int("FLUSH_MAX_RETRIES", 3)
-LOCAL_RETENTION_DAYS = _env_int("LOCAL_RETENTION_DAYS", 5)
+LOCAL_RETENTION_DAYS = _env_int("LOCAL_RETENTION_DAYS", 3)
+V3_PROPOSAL_LOG_PERSIST = _env_bool("V3_PROPOSAL_LOG_PERSIST", True)
+V3_PROPOSAL_LOG_DIR = Path(os.getenv("V3_PROPOSAL_LOG_DIR", str(DATA_DIR / "v3_proposal_logs")))
+V3_PROPOSAL_FEEDBACK_DIR = Path(os.getenv("V3_PROPOSAL_FEEDBACK_DIR", str(DATA_DIR / "v3_feedback")))
 
-# ---------------------------------------------------------------------------
-# Florence Inference Logging
-# ---------------------------------------------------------------------------
-
-FLORENCE_LOG_PERSIST = _env_bool("FLORENCE_LOG_PERSIST", True)
-FLORENCE_LOG_DIR = Path(os.getenv("FLORENCE_LOG_DIR", str(DATA_DIR / "florence_logs")))
-
-# ---------------------------------------------------------------------------
-# Media Export / Storage
-# ---------------------------------------------------------------------------
-
-# Keep S3 disabled by default for local-first operation.
+# Media export
 USE_S3 = _env_bool("USE_S3", False)
 AWS_ACCESS_KEY_ID = os.getenv("AWS_ACCESS_KEY_ID", "")
 AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
@@ -208,81 +205,19 @@ CLIP_SAVE_MAX_CONCURRENT = _env_int("CLIP_SAVE_MAX_CONCURRENT", 1)
 POSTPROCESS_WORKERS = _env_int("POSTPROCESS_WORKERS", 1)
 POSTPROCESS_QUEUE_SIZE = _env_int("POSTPROCESS_QUEUE_SIZE", 128)
 
-# ---------------------------------------------------------------------------
-# Router Steps (append-only JSONL for critic training)
-# ---------------------------------------------------------------------------
-
-ROUTER_STEPS_PATH = os.getenv(
-    "ROUTER_STEPS_PATH",
-    str(DATA_DIR / "router_steps.jsonl")
-)
-
-# ---------------------------------------------------------------------------
-# Cash Dual Path
-# ---------------------------------------------------------------------------
-
-CASH_DUAL_PATH_ENABLED = _env_bool("CASH_DUAL_PATH_ENABLED", True)
-CASH_GLOBAL_ASSIST_THRESHOLD = _env_float("CASH_GLOBAL_ASSIST_THRESHOLD", 0.30)
-
-# ---------------------------------------------------------------------------
-# YOLO-pose cash trigger (replaces Florence per-frame cash scanning)
-# ---------------------------------------------------------------------------
-YOLO_POSE_ENABLED = _env_bool("YOLO_POSE_ENABLED", False)
-YOLO_POSE_MODEL = os.getenv(
-    "YOLO_POSE_MODEL",
-    str(Path(__file__).resolve().parent.parent / "models" / "yolo" / "yolo26n-pose.pt"),
-)
-YOLO_POSE_DEVICE = os.getenv("YOLO_POSE_DEVICE", "cuda")
-YOLO_POSE_CONFIDENCE = _env_float("YOLO_POSE_CONFIDENCE", 0.3)
-YOLO_POSE_INPUT_SIZE = _env_int("YOLO_POSE_INPUT_SIZE", 640)
-
-# Cashier tracker parameters
-CASHIER_WATCH_SECONDS = _env_float("CASHIER_WATCH_SECONDS", 60.0)
-CASHIER_WATCH_MIN_OBS = _env_int("CASHIER_WATCH_MIN_OBS", 6)
-CASHIER_WRIST_CONF_THRESHOLD = _env_float("CASHIER_WRIST_CONF_THRESHOLD", 0.3)
-CASH_HAND_PROXIMITY_PX = _env_float("CASH_HAND_PROXIMITY_PX", 120.0)
-
-# If a person's wrist has been continuously inside cashier_zone for more than
-# this many seconds, force-reclassify them as customer. Staff's wrist typically
-# dips in and out of the zone while working; a person whose wrist is planted in
-# the zone for a long time is lingering (filling forms, signing) → customer.
-CASHIER_MAX_LINGER_SEC = _env_float("CASHIER_MAX_LINGER_SEC", 30.0)
-CASHIER_LINGER_GAP_TOLERANCE_SEC = _env_float("CASHIER_LINGER_GAP_TOLERANCE_SEC", 3.0)
-CASHIER_LINGER_CLUSTER_PX = _env_float("CASHIER_LINGER_CLUSTER_PX", 120.0)
-
-# Trigger-to-clip parameters
-CASH_TRIGGER_CLIP_SEC = _env_int("CASH_TRIGGER_CLIP_SEC", 14)
-CASH_TRIGGER_COOLDOWN_SEC = _env_float("CASH_TRIGGER_COOLDOWN_SEC", 20.0)
-CASH_TRIGGER_FLORENCE_FRAMES = _env_int("CASH_TRIGGER_FLORENCE_FRAMES", 6)
-# When Florence captions on the clip lack cash keywords but contain H2H-like
-# action words (handing/passing/exchanging), still escalate to Gemini.
-CASH_TRIGGER_H2H_ESCALATE = _env_bool("CASH_TRIGGER_H2H_ESCALATE", True)
-
-# ---------------------------------------------------------------------------
 # Logging
-# ---------------------------------------------------------------------------
-
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
-LOG_FORMAT = os.getenv(
-    "LOG_FORMAT",
-    "%(asctime)s [%(name)s] %(levelname)s: %(message)s"
-)
+LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s [%(name)s] %(levelname)s: %(message)s")
 
 
-def as_dict() -> Dict[str, Any]:
-    """Export all settings as a flat dictionary (for debugging/logging)."""
-    return {
-        k: v for k, v in globals().items()
-        if k.isupper() and not k.startswith("_")
-    }
-
-
-def load_dotenv(path: Optional[str] = None) -> None:
-    """Load .env file if python-dotenv is available."""
+def load_dotenv(path: str | None = None) -> None:
     try:
         from dotenv import load_dotenv as _load
-        env_path = path or os.getenv("MODEL_SERVER_ENV_FILE", str(BASE_DIR / ".env"))
-        if os.path.exists(env_path):
-            _load(env_path, override=True)
     except ImportError:
-        pass
+        return
+    if path:
+        _load(path, override=True)
+        return
+    default_env = BASE_DIR / ".env"
+    if default_env.exists():
+        _load(str(default_env), override=True)

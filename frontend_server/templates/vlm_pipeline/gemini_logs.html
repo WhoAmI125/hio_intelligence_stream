@@ -19,14 +19,7 @@
   .stat.ok .v { color:#0f7e4d; }
   .stat.no .v { color:#b11e47; }
   .stat.mid .v { color:#8d5a05; }
-  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; background:#fff; }
-  .pager { display:flex; flex-wrap:wrap; gap:6px; justify-content:center; align-items:center; margin:12px 0 4px; }
-  .pager .pg { min-width:34px; border:1px solid var(--line); background:#fff; color:var(--text); border-radius:8px; padding:6px 10px; font-size:13px; font-weight:700; cursor:pointer; }
-  .pager .pg:hover:not(:disabled) { background:#f4f8ff; border-color:#9dc2ff; }
-  .pager .pg.current { background:var(--primary); color:#fff; border-color:var(--primary); cursor:default; }
-  .pager .pg:disabled { opacity:0.5; cursor:not-allowed; }
-  .pager .pg.ellipsis { border:none; background:transparent; cursor:default; padding:6px 4px; }
-  .pager .summary { margin-left:10px; color:var(--sub); font-size:12px; }
+  .table-wrap { border:1px solid var(--line); border-radius:12px; overflow:auto; max-height:620px; background:#fff; }
   table { width:100%; border-collapse:collapse; font-size:12px; }
   th,td { padding:8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:top; }
   th { position:sticky; top:0; z-index:1; background:#f4f8ff; color:#355070; }
@@ -107,7 +100,7 @@
 </div>
 
 <div class="legend">
-  `SKIP` = Gemini 미호출(Tier1에서 불확실성 게이트 통과). 오탐이 아니라 Gemini API 호출 생략 상태입니다.
+  v3는 local prefilter를 통과한 후보를 Gemini temporal validator로 검증합니다. `SKIP`은 비활성화, API 오류, 또는 legacy fallback 상태입니다.
 </div>
 
 <div class="stats">
@@ -126,6 +119,7 @@
         <th style="width:80px;">Scenario</th>
         <th style="width:92px;">Decision</th>
         <th style="width:78px;">Conf</th>
+        <th style="width:220px;">Tier-2 (SigLIP)</th>
         <th style="width:110px;">Input</th>
         <th>Reason</th>
         <th style="width:210px;">Feedback</th>
@@ -133,12 +127,10 @@
       </tr>
     </thead>
     <tbody id="rows">
-      <tr><td colspan="9" class="muted">loading...</td></tr>
+      <tr><td colspan="10" class="muted">loading...</td></tr>
     </tbody>
   </table>
 </div>
-
-<div id="pager" class="pager"></div>
 
 <div id="reasonModal" class="modal" role="dialog" aria-modal="true">
   <div class="modal-card">
@@ -247,11 +239,7 @@
 {% block extra_js %}
 <script>
   const rowsEl = document.getElementById("rows");
-  const pagerEl = document.getElementById("pager");
   let allEvents = [];
-
-  const PAGE_SIZE = 30;
-  let currentPage = 1;
 
   const ALLOWED_ERROR_TYPES = new Set([
     "false_positive",
@@ -269,15 +257,103 @@
   };
 
   const esc = (s) => String(s || "").replace(/[&<>\"']/g, (c) => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
-  const fmtTs = (iso) => { try { const d = new Date(iso); return Number.isNaN(d.getTime()) ? (iso || "-") : d.toLocaleString(); } catch { return iso || "-"; } };
+  // Server writes `at` as naive ISO in KST (datetime.now() on the KST host).
+  // Anchor parsing to +09:00 so timestamps render identically regardless of
+  // the viewer's local timezone, and trim 6-digit microseconds to 3-digit ms.
+  function parseAt(iso) {
+    if (!iso) return null;
+    const s = String(iso).trim();
+    if (/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      const d = new Date(s); return Number.isNaN(d.getTime()) ? null : d;
+    }
+    const m = s.match(/^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2})(?:\.(\d+))?$/);
+    if (!m) { const d = new Date(s); return Number.isNaN(d.getTime()) ? null : d; }
+    const ms = (m[3] || "000").slice(0, 3).padEnd(3, "0");
+    const d = new Date(`${m[1]}T${m[2]}.${ms}+09:00`);
+    return Number.isNaN(d.getTime()) ? null : d;
+  }
+  // event_id is `ev_<epoch_ms>_<scenario>_<camera>` — epoch ms is always
+  // unambiguous UTC, so prefer it over the `at` string (which historically
+  // mixed naive-KST and naive-UTC values).
+  function eventTs(ev) {
+    if (!ev) return null;
+    const m = String(ev.event_id || "").match(/^ev_(\d{10,16})_/);
+    if (m) {
+      const ms = Number(m[1]);
+      if (Number.isFinite(ms)) return new Date(ms);
+    }
+    return parseAt(ev.at);
+  }
+  const fmtTs = (iso) => {
+    const d = parseAt(iso);
+    if (!d) return iso || "-";
+    try { return d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }); }
+    catch { return d.toLocaleString(); }
+  };
+  const fmtTsEv = (ev) => {
+    const d = eventTs(ev);
+    if (!d) return (ev && ev.at) || "-";
+    try { return d.toLocaleString("ko-KR", { timeZone: "Asia/Seoul" }); }
+    catch { return d.toLocaleString(); }
+  };
+  // KST day (YYYYMMDD) for an event's true epoch.
+  const _kstDayFmt = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+  });
+  function kstDayKey(d) {
+    if (!d) return "";
+    return _kstDayFmt.format(d).replace(/-/g, ""); // YYYYMMDD
+  }
+  function eventKstDay(ev) {
+    return kstDayKey(eventTs(ev));
+  }
+  // YYYYMMDD ± n days arithmetic (string in -> string out).
+  function shiftDay(ymd, deltaDays) {
+    const m = String(ymd || "").match(/^(\d{4})(\d{2})(\d{2})$/);
+    if (!m) return ymd;
+    const dt = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3]));
+    dt.setUTCDate(dt.getUTCDate() + deltaDays);
+    const y = dt.getUTCFullYear();
+    const mo = String(dt.getUTCMonth() + 1).padStart(2, "0");
+    const d = String(dt.getUTCDate()).padStart(2, "0");
+    return `${y}${mo}${d}`;
+  }
   const shortText = (v, m = 90) => { const s = String(v || "").replace(/\s+/g, " ").trim(); return !s ? "" : (s.length <= m ? s : s.slice(0, m - 1).trimEnd() + "..."); };
 
-  function geminiState(g) {
+  function geminiState(g, ev) {
+    // Top-level rejected_by_gemini is written by the post-processor.
+    if (ev && ev.rejected_by_gemini === true) return "decline";
     if (!g || typeof g !== "object") return "pending";
     if (g.state === "skipped") return "skip";
     if (g.validated === true) return "accept";
     if (g.validated === false) return "decline";
+    // v3 Gemini validator writes is_valid_event (bool or null).
+    if (g.is_valid_event === true) return "accept";
+    if (g.is_valid_event === false) return "decline";
+    // Last resort: reason present + confidence 0 = hard-gate decline.
+    if (String(g.reason || "").trim() && Number(g.confidence || 0) === 0) return "decline";
     return "pending";
+  }
+
+  function tier2Summary(ev) {
+    // Surface Tier-2 SigLIP + classifier info so the operator can see *why*
+    // each event reached Gemini (or would have been suppressed by the gate).
+    const ys = ev && ev.yolo_summary;
+    const ss = ys && ys.semantic_scores;
+    const scores = (ss && ss.scores) || {};
+    const details = (ss && ss.details) || {};
+    const lp = ev && ev.local_prefilter;
+    const sc = String(ev && (ev.event_type || ev.scenario) || "").toLowerCase();
+    const siglip = Number(scores[sc] != null ? scores[sc] : 0).toFixed(3);
+    const preGate = lp && typeof lp.pre_gate_score === "number" ? lp.pre_gate_score.toFixed(2) : "-";
+    const gateTrig = lp && lp.siglip_gate_triggered === true;
+    const detailParts = [];
+    const sdet = details[sc] || {};
+    if (typeof sdet.classifier_fighting === "number") detailParts.push(`fight:${sdet.classifier_fighting.toFixed(2)}`);
+    if (typeof sdet.classifier_fire === "number") detailParts.push(`fire:${sdet.classifier_fire.toFixed(2)}`);
+    if (typeof sdet.classifier_smoke === "number") detailParts.push(`smoke:${sdet.classifier_smoke.toFixed(2)}`);
+    const badge = gateTrig ? '<span class="badge no" style="font-size:10px">GATE</span> ' : "";
+    return `${badge}siglip:${siglip} t1:${typeof ev.tier1_confidence === "number" ? ev.tier1_confidence.toFixed(2) : "-"} preGate:${preGate}` + (detailParts.length ? ` | ${detailParts.join(" ")}` : "");
   }
 
   function badge(state) {
@@ -431,7 +507,7 @@
     const scenario = String(ev.event_type || ev.scenario || "").trim();
     const g = ev.gemini || {};
     const st = geminiState(g);
-    const reason = String(g.reason || "").trim() || (st === "skip" ? "Tier1 confident enough, Gemini not called." : "");
+    const reason = String(g.reason || "").trim() || (st === "skip" ? "Gemini skipped or disabled for this candidate." : "");
 
     document.getElementById("fbEventId").value = uiState.targetEventId;
     document.getElementById("fbCamera").value = String(ev.camera_id || "-");
@@ -527,27 +603,76 @@
     }
   }
 
-  async function loadEvents() {
-    const d = document.getElementById("fDate").value;
-    const params = new URLSearchParams({ limit: "400" });
-    if (d) params.set("date", d);
-    // Load camera names in parallel so display_name is available on first render.
-    const [res] = await Promise.all([
-      fetch("/api/vlm/events/?" + params.toString()),
-      loadCameraNames(),
-    ]);
-    const data = await res.json().catch(() => ({}));
-    allEvents = Array.isArray(data.events) ? data.events : [];
-    bindDateOptions(Array.isArray(data.dates) ? data.dates : []);
-    bindCameraOptions(allEvents);
-    render();
+  // Default events page = 150 rows. Each event JSON is ~10KB on disk and the
+  // backend reads them sequentially; 400 rows costs ~2s every poll, which is
+  // why operators reported the page feeling slow.
+  let _evLoading = false;
+  let _lastTopId = "";
+  async function loadEvents(force) {
+    if (_evLoading) return;
+    if (!force && document.visibilityState === "hidden") return;
+    _evLoading = true;
+    try {
+      const d = document.getElementById("fDate").value;
+      // For a specific date use kst_date so the backend stitches the two
+      // adjacent UTC buckets into a single KST day. Realtime/no-date uses
+      // the cheaper code path with a smaller limit.
+      const params = new URLSearchParams();
+      if (d) {
+        params.set("kst_date", d);
+        params.set("limit", "3000");
+      } else {
+        params.set("limit", "150");
+      }
+      const [res] = await Promise.all([
+        fetch("/api/vlm/events/?" + params.toString()),
+        loadCameraNames(),
+      ]);
+      const data = await res.json().catch(() => ({}));
+      const events = Array.isArray(data.events) ? data.events.slice() : [];
+      events.sort((a, b) => {
+        const ta = eventTs(a); const tb = eventTs(b);
+        return (tb ? tb.getTime() : 0) - (ta ? ta.getTime() : 0);
+      });
+      const topId = String(events[0]?.event_id || "");
+      const sameTop = topId && topId === _lastTopId;
+      allEvents = events;
+      bindDateOptions(Array.isArray(data.dates) ? data.dates : []);
+      bindCameraOptions(allEvents);
+      if (force || !sameTop) {
+        _lastTopId = topId;
+        render();
+      } else {
+        renderStats(filteredEvents());
+      }
+    } finally {
+      _evLoading = false;
+    }
   }
 
+  function kstTodayKey() {
+    const fmt = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Seoul", year: "numeric", month: "2-digit", day: "2-digit",
+    });
+    return fmt.format(new Date()).replace(/-/g, ""); // YYYYMMDD
+  }
+  function prettyDate(d) {
+    const s = String(d || "").trim();
+    return /^\d{8}$/.test(s) ? `${s.slice(0,4)}-${s.slice(4,6)}-${s.slice(6,8)}` : s;
+  }
   function bindDateOptions(dates) {
     const sel = document.getElementById("fDate");
     const prev = sel.value;
-    const opts = ['<option value="">realtime(today)</option>'];
-    dates.forEach((d) => opts.push(`<option value="${esc(d)}">${esc(d)}</option>`));
+    const today = kstTodayKey();
+    // The backend's `dates` list omits today by design (today's events are
+    // streamed via the empty-`date` "realtime" path). Surface today as a
+    // selectable option too so the operator can see the current day.
+    const merged = [...new Set([today, ...(dates || [])])].sort().reverse();
+    const opts = ['<option value="">realtime (오늘 라이브)</option>'];
+    merged.forEach((d) => {
+      const label = d === today ? `${prettyDate(d)} (오늘)` : prettyDate(d);
+      opts.push(`<option value="${esc(d)}">${esc(label)}</option>`);
+    });
     sel.innerHTML = opts.join("");
     if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
   }
@@ -616,74 +741,30 @@
     document.getElementById("sSkip").textContent = String(s);
   }
 
-  function buildPagerPages(current, total) {
-    if (total <= 7) {
-      return Array.from({ length: total }, (_, i) => i + 1);
-    }
-    const pages = new Set([1, total, current, current - 1, current + 1]);
-    if (current <= 4) [2, 3, 4, 5].forEach((p) => pages.add(p));
-    if (current >= total - 3) [total - 4, total - 3, total - 2, total - 1].forEach((p) => pages.add(p));
-    const sorted = [...pages].filter((p) => p >= 1 && p <= total).sort((a, b) => a - b);
-    const out = [];
-    for (let i = 0; i < sorted.length; i += 1) {
-      if (i > 0 && sorted[i] - sorted[i - 1] > 1) out.push("...");
-      out.push(sorted[i]);
-    }
-    return out;
-  }
-
-  function renderPager(totalItems) {
-    const totalPages = Math.max(1, Math.ceil(totalItems / PAGE_SIZE));
-    if (currentPage > totalPages) currentPage = totalPages;
-    if (currentPage < 1) currentPage = 1;
-
-    if (totalItems === 0) {
-      pagerEl.innerHTML = "";
-      return;
-    }
-
-    const from = (currentPage - 1) * PAGE_SIZE + 1;
-    const to = Math.min(totalItems, currentPage * PAGE_SIZE);
-    const pages = buildPagerPages(currentPage, totalPages);
-
-    const parts = [];
-    parts.push(`<button class="pg" data-go="prev" ${currentPage === 1 ? "disabled" : ""}>&laquo; Prev</button>`);
-    pages.forEach((p) => {
-      if (p === "...") {
-        parts.push('<span class="pg ellipsis">...</span>');
-      } else if (p === currentPage) {
-        parts.push(`<button class="pg current" disabled>${p}</button>`);
-      } else {
-        parts.push(`<button class="pg" data-go="${p}">${p}</button>`);
-      }
-    });
-    parts.push(`<button class="pg" data-go="next" ${currentPage === totalPages ? "disabled" : ""}>Next &raquo;</button>`);
-    parts.push(`<span class="summary">${from}-${to} / ${totalItems}</span>`);
-    pagerEl.innerHTML = parts.join("");
-  }
-
   function renderTable(list) {
     if (!list.length) {
-      rowsEl.innerHTML = '<tr><td colspan="9" class="muted">No gemini logs.</td></tr>';
+      rowsEl.innerHTML = '<tr><td colspan="10" class="muted">No gemini logs.</td></tr>';
       return;
     }
 
     rowsEl.innerHTML = list.map((ev) => {
       const g = ev.gemini || {};
-      const st = geminiState(g);
-      const reason = String(g.reason || "").trim() || (st === "skip" ? "Tier1 confident enough, Gemini not called." : "");
+      const st = geminiState(g, ev);
+      const reason = String(g.reason || "").trim() || (st === "skip" ? "Gemini skipped or disabled for this candidate." : "");
       const reasonBtn = reason
         ? `<button class="reason-btn" type="button" onclick='openGeminiDetail(${JSON.stringify(JSON.stringify({event_id: ev.event_id, at: ev.at, camera_id: ev.camera_id, scenario: ev.event_type || ev.scenario, state: st, confidence: g.confidence, reason: reason, input_mode: g.input_mode, validation_type: g.validation_type, processing_time_ms: g.processing_time_ms, packet_summary: g.packet_summary || null}, null, 2))})'>${esc(shortText(reason, 70))}</button>`
         : '<span class="muted">-</span>';
 
-      // Media strip: "clip" (video) | "ROI" (zone-overlay snapshot or thumbnail fallback).
-      // Label is kept consistent regardless of whether overlay assets exist,
-      // so operators see one uniform column format across scenarios.
+      // Media strip for v3: raw full-frame, one context overlay, skeleton JSON, and Gemini validation metadata.
       const roiClipUrl = ev.overlay_clip_url || "";
       const roiSnapUrl = ev.overlay_snapshot_url || "";
+      const cands = ev.candidate_clip_paths || {};
       const clipUrl = roiClipUrl || ev.clip_url || "";
       const snapUrl = roiSnapUrl || ev.thumbnail_url || "";
       const media = [
+        cands.raw ? `<a class="link" href="${esc(cands.raw)}" target="_blank">raw</a>` : "",
+        cands.context_overlay ? `<a class="link" href="${esc(cands.context_overlay)}" target="_blank">context overlay</a>` : "",
+        cands.skeleton_json ? `<a class="link" href="${esc(cands.skeleton_json)}" target="_blank">skeleton JSON</a>` : "",
         clipUrl ? `<a class="link" href="${esc(clipUrl)}" target="_blank">clip</a>` : "",
         snapUrl ? `<a class="link" href="${esc(snapUrl)}" target="_blank">ROI</a>` : "",
         g.validation_clip_url ? `<a class="link" href="${esc(g.validation_clip_url)}" target="_blank">gemini</a>` : "",
@@ -701,11 +782,12 @@
 
       return `
         <tr>
-          <td>${esc(fmtTs(ev.at))}</td>
+          <td>${esc(fmtTsEv(ev))}</td>
           <td title="id: ${esc(ev.camera_id || "")}">${esc(displayNameFor(ev.camera_id))}</td>
           <td>${esc(ev.event_type || ev.scenario || "-")}</td>
           <td>${badge(st)}</td>
           <td>${typeof g.confidence === "number" ? g.confidence.toFixed(2) : "-"}</td>
+          <td class="mono" style="font-size:11px;">${tier2Summary(ev)}</td>
           <td>${esc(parseInputType(g, st))}</td>
           <td>${reasonBtn}</td>
           <td>${feedbackCell}</td>
@@ -717,42 +799,20 @@
   function render() {
     const list = filteredEvents();
     renderStats(list);
-    const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
-    if (currentPage > totalPages) currentPage = totalPages;
-    if (currentPage < 1) currentPage = 1;
-    const start = (currentPage - 1) * PAGE_SIZE;
-    renderTable(list.slice(start, start + PAGE_SIZE));
-    renderPager(list.length);
+    renderTable(list);
   }
-
-  function renderFromFilterChange() {
-    currentPage = 1;
-    render();
-  }
-
-  pagerEl.addEventListener("click", (e) => {
-    const btn = e.target.closest("button[data-go]");
-    if (!btn) return;
-    const go = btn.dataset.go;
-    const list = filteredEvents();
-    const totalPages = Math.max(1, Math.ceil(list.length / PAGE_SIZE));
-    if (go === "prev") currentPage = Math.max(1, currentPage - 1);
-    else if (go === "next") currentPage = Math.min(totalPages, currentPage + 1);
-    else {
-      const n = parseInt(go, 10);
-      if (Number.isFinite(n)) currentPage = Math.min(totalPages, Math.max(1, n));
-    }
-    render();
-    document.querySelector(".table-wrap")?.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
 
   ["fCameraSel", "fCamera", "fScenario", "fDecision"].forEach((id) => {
-    document.getElementById(id).addEventListener("input", renderFromFilterChange);
-    document.getElementById(id).addEventListener("change", renderFromFilterChange);
+    document.getElementById(id).addEventListener("input", render);
+    document.getElementById(id).addEventListener("change", render);
   });
 
-  document.getElementById("fDate").addEventListener("change", loadEvents);
-  document.getElementById("btnRefresh").addEventListener("click", loadEvents);
+  document.getElementById("fDate").addEventListener("change", () => loadEvents(true));
+  document.getElementById("btnRefresh").addEventListener("click", () => loadEvents(true));
+  // Resume polling immediately when the tab comes back into focus.
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") loadEvents(true);
+  });
 
   document.getElementById("btnCloseModal").addEventListener("click", () => document.getElementById("reasonModal").classList.remove("open"));
   document.getElementById("reasonModal").addEventListener("click", (e) => {
@@ -773,7 +833,9 @@
     }
   });
 
-  loadEvents();
-  setInterval(loadEvents, 6000);
+  loadEvents(true);
+  // 12s polling is plenty for v3 events (post-processing + Gemini round-trip
+  // already takes 5–10s) and roughly halves the disk-I/O load on the host.
+  setInterval(() => loadEvents(false), 12000);
 </script>
 {% endblock %}

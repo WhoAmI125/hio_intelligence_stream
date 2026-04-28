@@ -1,29 +1,22 @@
 [Unit]
-Description=VLM DB Server (SQLite Event Storage)
-After=network.target
+Description=HIO v3 DB Server (SQLite WAL event store)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=vlmapp
-Group=vlmapp
-WorkingDirectory=/home/ubuntu/hio_intelligence_stream
-Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
-Environment=TZ=Asia/Seoul
-EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
-
-ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
-    db_server.main:app \
-    --host 127.0.0.1 \
-    --port 8001 \
-    --workers 1 \
-    --timeout-keep-alive 65 \
-    --log-level info
-
-Restart=on-failure
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hio_intelligence_stream_v3
+EnvironmentFile=/opt/hio_intelligence_stream_v3/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hio_intelligence_stream_v3/.venv/bin/python -m uvicorn db_server.main:app --host 0.0.0.0 --port 8001 --workers 1
+Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=vlm-db
+TimeoutStopSec=60
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/hio/db.log
+StandardError=append:/var/log/hio/db.err
 
 [Install]
 WantedBy=multi-user.target

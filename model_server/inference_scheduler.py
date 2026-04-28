@@ -5,6 +5,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Optional
 
+from model_server import config as server_config
+
 
 logger = logging.getLogger("model_server.inference_scheduler")
 
@@ -152,8 +154,9 @@ class InferenceScheduler:
                 if runtime.get("pending") or runtime.get("inflight"):
                     continue
 
-                base_fps = max(float(state.get("base_fps", 1.5) or 1.5), 0.5)
-                target_fps = base_fps
+                base_fps = max(float(state.get("base_fps", 3.0) or 3.0), 0.5)
+                pose_fps = max(float(getattr(server_config, "V3_POSE_FPS", 3.0) or 3.0), 0.5)
+                target_fps = max(base_fps, pose_fps)
                 last_active_ts = float(runtime.get("last_active_ts", 0.0) or 0.0)
                 if now - last_active_ts <= self.active_burst_sec:
                     target_fps = max(base_fps, self.active_burst_fps)

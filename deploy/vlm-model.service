@@ -1,36 +1,22 @@
 [Unit]
-Description=VLM Model Server (Florence-2 GPU + Tier-2 Pipeline)
-After=network.target
-Wants=vlm-db.service
+Description=HIO v3 Model Server (YOLO26 + SigLIP + Gemini)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=vlmapp
-Group=vlmapp
-WorkingDirectory=/home/ubuntu/hio_intelligence_stream
-Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
-Environment=TZ=Asia/Seoul
-EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
-Environment=HF_HOME=/home/ubuntu/hio_intelligence_stream/models/hf
-Environment=HF_MODULES_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/modules
-Environment=TRANSFORMERS_CACHE=/home/ubuntu/hio_intelligence_stream/models/hf/transformers
-
-ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
-    model_server.main:app \
-    --host 127.0.0.1 \
-    --port 8000 \
-    --workers 1 \
-    --timeout-keep-alive 65 \
-    --log-level info
-
-Restart=on-failure
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hio_intelligence_stream_v3
+EnvironmentFile=/opt/hio_intelligence_stream_v3/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hio_intelligence_stream_v3/.venv/bin/python -m uvicorn model_server.main:app --host 0.0.0.0 --port 8000 --workers 1
+Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=vlm-model
-
-# GPU access
-SupplementaryGroups=video render
+TimeoutStopSec=120
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/hio/model.log
+StandardError=append:/var/log/hio/model.err
 
 [Install]
 WantedBy=multi-user.target

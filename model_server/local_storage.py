@@ -28,19 +28,63 @@ import shutil
 import subprocess
 import cv2
 import numpy as np
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
+
+# All directory bucketing and on-disk timestamps use Korean Standard Time so
+# that the calendar day matches operator expectations regardless of the host's
+# process timezone.
+KST = timezone(timedelta(hours=9))
+
+
+def _now_kst() -> datetime:
+    return datetime.now(KST)
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+
+def _build_ffmpeg_encode_args(
+    encoder: str,
+    preset: str,
+    crf: str,
+    nvenc_preset: str,
+    nvenc_cq: str,
+) -> List[str]:
+    """Return encoder-specific ffmpeg args.
+
+    libx264  : CPU, widely compatible, consumes ~0.4 vCPU per 720p clip.
+    h264_nvenc: NVIDIA GPU, ~10x faster, frees CPU for YOLO/Gemini but
+                consumes NVENC session slot (T4 = 3 slots).
+    """
+    enc = (encoder or "libx264").lower()
+    if enc in {"h264_nvenc", "nvenc"}:
+        return [
+            "-c:v", "h264_nvenc",
+            "-preset", nvenc_preset,
+            "-rc", "vbr",
+            "-cq", nvenc_cq,
+            "-b:v", "0",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+        ]
+    return [
+        "-c:v", "libx264",
+        "-preset", preset,
+        "-crf", crf,
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+    ]
 
 
 # Overlay drawing helpers for visual-hint clips/thumbnails
 # cashier: yellow polygon, drawer: cyan polygon
 _OVERLAY_COLORS: Dict[str, Tuple[int, int, int]] = {
     "cashier": (0, 255, 255),
+    "cashier_red": (0, 0, 255),
     "drawer": (255, 255, 0),
 }
 _OVERLAY_LABELS: Dict[str, str] = {
     "cashier": "CASHIER ZONE",
+    "cashier_red": "CASHIER ROI",
     "drawer": "DRAWER",
 }
 
@@ -171,7 +215,7 @@ class LocalStorage:
         self.flushed_dates_dir = self.flush_state_dir / "flushed_dates"
         self.local_retention_days = max(
             1,
-            int(getattr(config, "LOCAL_RETENTION_DAYS", 5) or 5),
+            int(getattr(config, "LOCAL_RETENTION_DAYS", 3) or 3),
         )
         self.events_dir.mkdir(parents=True, exist_ok=True)
         self.clips_dir.mkdir(parents=True, exist_ok=True)
@@ -186,7 +230,7 @@ class LocalStorage:
 
     def _mark_flushed_date(self, date_str: str) -> None:
         marker = self._flushed_marker_path(date_str)
-        marker.write_text(datetime.now().isoformat(), encoding="utf-8")
+        marker.write_text(_now_kst().isoformat(), encoding="utf-8")
 
     def _all_local_dates(self) -> list[str]:
         dates: set[str] = set()
@@ -197,13 +241,6 @@ class LocalStorage:
         return sorted(dates)
 
     def _event_ids_with_human_feedback(self, date_str: str) -> set[str]:
-        """
-        Scan events/{date_str}/*.json and return event_ids whose JSON contains
-        non-empty human_feedback (canonical GT from /monitor/labeling).
-
-        Labeled events are protected from retention cleanup — we keep their JSON
-        plus associated clip and thumbnail files indefinitely.
-        """
         protected: set[str] = set()
         day_events = self.events_dir / date_str
         if not day_events.exists():
@@ -213,17 +250,16 @@ class LocalStorage:
                 data = json.loads(fp.read_text(encoding="utf-8"))
             except Exception:
                 continue
-            fb = data.get("human_feedback")
-            if not fb:
+            feedback = data.get("human_feedback")
+            if not feedback:
                 continue
-            # Accept dict with decision, or non-empty string, or truthy value.
-            if isinstance(fb, dict):
-                decision = str(fb.get("decision") or "").strip().lower()
-                if decision in {"accept", "decline", "unsure", "tp", "fp", "unclear"}:
+            if isinstance(feedback, dict):
+                decision = str(feedback.get("decision") or feedback.get("label") or "").strip().lower()
+                if decision in {"accept", "decline", "unsure", "tp", "fp", "unclear", "true_positive", "false_positive"}:
                     protected.add(fp.stem)
-            elif isinstance(fb, str) and fb.strip():
+            elif isinstance(feedback, str) and feedback.strip():
                 protected.add(fp.stem)
-            elif fb:
+            elif feedback:
                 protected.add(fp.stem)
         return protected
 
@@ -238,64 +274,57 @@ class LocalStorage:
                 continue
 
             protected_ids = self._event_ids_with_human_feedback(date_str)
+            if protected_ids:
+                protected_prefixes: set[str] = set()
+                for eid in protected_ids:
+                    protected_prefixes.add(eid)
+                    protected_prefixes.add(f"val_{eid}")
 
-            if not protected_ids:
-                # No labeled events — safe to remove the whole day directory.
+                kept = 0
+                removed = 0
                 for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
                     day_dir = base / date_str
-                    if day_dir.exists():
-                        shutil.rmtree(day_dir, ignore_errors=True)
-                marker = self._flushed_marker_path(date_str)
-                if marker.exists():
-                    marker.unlink()
+                    if not day_dir.exists():
+                        continue
+                    for entry in list(day_dir.iterdir()):
+                        if any(entry.name.startswith(prefix) for prefix in protected_prefixes):
+                            kept += 1
+                            continue
+                        try:
+                            if entry.is_file() or entry.is_symlink():
+                                entry.unlink()
+                            elif entry.is_dir():
+                                shutil.rmtree(entry, ignore_errors=True)
+                            removed += 1
+                        except OSError as exc:
+                            logger.debug("[LocalStorage] Retention cleanup skipped %s: %s", entry, exc)
+                    try:
+                        if not any(day_dir.iterdir()):
+                            day_dir.rmdir()
+                    except OSError:
+                        pass
                 logger.info(
-                    "[LocalStorage] Removed local data for %s after retention window (%s days)",
+                    "[LocalStorage] Retention cleanup for %s: kept %d labeled files, removed %d unlabeled files",
                     date_str,
-                    self.local_retention_days,
+                    kept,
+                    removed,
                 )
                 continue
 
-            # Selective cleanup: preserve files whose names start with a protected
-            # event_id (covers {eid}.json, {eid}.mp4, {eid}_roi.mp4, val_{eid}.mp4,
-            # {eid}.jpg, etc.).
-            protected_prefixes = set()
-            for eid in protected_ids:
-                protected_prefixes.add(eid)
-                protected_prefixes.add(f"val_{eid}")
-
-            kept, removed = 0, 0
             for base in (self.events_dir, self.clips_dir, self.thumbnails_dir):
                 day_dir = base / date_str
-                if not day_dir.exists():
-                    continue
-                for entry in list(day_dir.iterdir()):
-                    if any(entry.name.startswith(p) for p in protected_prefixes):
-                        kept += 1
-                        continue
-                    try:
-                        if entry.is_file() or entry.is_symlink():
-                            entry.unlink()
-                        elif entry.is_dir():
-                            shutil.rmtree(entry, ignore_errors=True)
-                        removed += 1
-                    except OSError as exc:
-                        logger.debug(
-                            "[LocalStorage] Retention cleanup skipped %s: %s",
-                            entry, exc,
-                        )
-                # If the day dir is empty after selective cleanup, drop it.
-                try:
-                    if not any(day_dir.iterdir()):
-                        day_dir.rmdir()
-                except OSError:
-                    pass
+                if day_dir.exists():
+                    shutil.rmtree(day_dir, ignore_errors=True)
+
+            marker = self._flushed_marker_path(date_str)
+            if marker.exists():
+                marker.unlink()
 
             logger.info(
-                "[LocalStorage] Retention cleanup for %s: kept %d labeled-event files, "
-                "removed %d unlabeled files (labeled event_ids=%d)",
-                date_str, kept, removed, len(protected_ids),
+                "[LocalStorage] Removed local data for %s after retention window (%s days)",
+                date_str,
+                self.local_retention_days,
             )
-            # Keep the flushed marker so we don't re-process this date.
 
     # ------------------------------------------------------------------
     # Events
@@ -308,13 +337,13 @@ class LocalStorage:
         Returns:
             Path to the saved file.
         """
-        date_str = datetime.now().strftime("%Y%m%d")
+        date_str = _now_kst().strftime("%Y%m%d")
         day_dir = self.events_dir / date_str
         day_dir.mkdir(parents=True, exist_ok=True)
 
         filepath = day_dir / f"{event_id}.json"
         event_data['event_id'] = event_id
-        event_data['saved_at'] = datetime.now().isoformat()
+        event_data['saved_at'] = _now_kst().isoformat()
 
         with open(filepath, 'w', encoding='utf-8') as f:
             json.dump(event_data, f, ensure_ascii=False, indent=2, default=str)
@@ -331,7 +360,7 @@ class LocalStorage:
     def get_event(self, event_id: str, date_str: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """Load an event by ID. Searches today if date_str is not given."""
         if date_str is None:
-            date_str = datetime.now().strftime("%Y%m%d")
+            date_str = _now_kst().strftime("%Y%m%d")
 
         filepath = self.events_dir / date_str / f"{event_id}.json"
         if not filepath.exists():
@@ -352,18 +381,42 @@ class LocalStorage:
         date_str: Optional[str] = None,
         scenario: Optional[str] = None,
         limit: int = 100,
+        epoch_ms_min: Optional[int] = None,
+        epoch_ms_max: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
-        """List events, optionally filtered by date and scenario."""
+        """List events, optionally filtered by date and scenario.
+
+        epoch_ms_min/max: when set, skip JSON files whose filename epoch is
+        outside [min, max). Filenames look like ``ev_<epoch_ms>_<...>.json`` so
+        the gate happens before any disk read, which keeps KST-day queries
+        fast even when each on-disk bucket holds thousands of events.
+        """
         if date_str:
             dirs = [self.events_dir / date_str]
         else:
             dirs = sorted(self.events_dir.iterdir(), reverse=True)
+
+        def _epoch_from_name(name: str) -> Optional[int]:
+            if not name.startswith("ev_"):
+                return None
+            parts = name.split("_")
+            if len(parts) < 2 or not parts[1].isdigit():
+                return None
+            return int(parts[1])
 
         events = []
         for day_dir in dirs:
             if not day_dir.is_dir():
                 continue
             for fp in sorted(day_dir.glob("*.json"), reverse=True):
+                if epoch_ms_min is not None or epoch_ms_max is not None:
+                    ms = _epoch_from_name(fp.name)
+                    if ms is None:
+                        continue
+                    if epoch_ms_min is not None and ms < epoch_ms_min:
+                        continue
+                    if epoch_ms_max is not None and ms >= epoch_ms_max:
+                        continue
                 try:
                     with open(fp, 'r', encoding='utf-8') as f:
                         ev = json.load(f)
@@ -437,7 +490,7 @@ class LocalStorage:
             fps = 15.0
         fps = max(1.0, min(60.0, fps))
 
-        date_str = datetime.now().strftime("%Y%m%d")
+        date_str = _now_kst().strftime("%Y%m%d")
         day_dir = self.clips_dir / date_str
         day_dir.mkdir(parents=True, exist_ok=True)
 
@@ -457,27 +510,23 @@ class LocalStorage:
                     writer.write(frame)
             writer.release()
 
-            # Step 2: Convert to H.264 using FFmpeg
+            # Step 2: Convert to H.264 using FFmpeg (CPU-light profile by default).
             ffmpeg_path = getattr(config, "FFMPEG_PATH", "ffmpeg")
+            ffmpeg_preset = str(getattr(config, "FFMPEG_PRESET", "ultrafast") or "ultrafast")
+            ffmpeg_crf = str(int(getattr(config, "FFMPEG_CRF", 28) or 28))
+            ffmpeg_encoder = str(getattr(config, "FFMPEG_ENCODER", "libx264") or "libx264").lower()
+            ffmpeg_nvenc_preset = str(getattr(config, "FFMPEG_NVENC_PRESET", "p3") or "p3")
+            ffmpeg_nvenc_cq = str(int(getattr(config, "FFMPEG_NVENC_CQ", 28) or 28))
             try:
+                enc_args = _build_ffmpeg_encode_args(
+                    ffmpeg_encoder, ffmpeg_preset, ffmpeg_crf,
+                    ffmpeg_nvenc_preset, ffmpeg_nvenc_cq,
+                )
                 result = subprocess.run(
                     [
-                        ffmpeg_path,
-                        "-y",
-                        "-i",
-                        str(temp_path),
-                        "-c:v",
-                        "libx264",
-                        "-preset",
-                        "fast",
-                        "-crf",
-                        "23",
-                        "-pix_fmt",
-                        "yuv420p",
-                        "-movflags",
-                        "+faststart",
-                        "-r",
-                        f"{fps:.3f}",
+                        ffmpeg_path, "-y", "-i", str(temp_path),
+                        *enc_args,
+                        "-r", f"{fps:.3f}",
                         str(final_path),
                     ],
                     capture_output=True,
@@ -487,7 +536,8 @@ class LocalStorage:
                     ffmpeg_ok = True
                     logger.info(
                         f"[LocalStorage] FFmpeg converted clip: {final_path} "
-                        f"({len(frames)} frames, {len(frames)/max(fps, 0.1):.1f}s)"
+                        f"({len(frames)} frames, {len(frames)/max(fps, 0.1):.1f}s, "
+                        f"preset={ffmpeg_preset} crf={ffmpeg_crf})"
                     )
                 else:
                     stderr_txt = (result.stderr or b"").decode(errors="ignore")
@@ -558,6 +608,114 @@ class LocalStorage:
                     return str(clip_path)
         return None
 
+    def save_clip_stream(
+        self,
+        event_id: str,
+        frames: List[Any],
+        fps: float = 15.0,
+        codec: str = "mp4v",
+        allow_s3: bool = True,
+        transform: Optional[Any] = None,
+    ) -> Optional[str]:
+        """Save a transformed clip without materializing all transformed frames."""
+        if not frames:
+            return None
+        try:
+            fps = float(fps or 15.0)
+        except Exception:
+            fps = 15.0
+        fps = max(1.0, min(60.0, fps))
+
+        date_str = _now_kst().strftime("%Y%m%d")
+        day_dir = self.clips_dir / date_str
+        day_dir.mkdir(parents=True, exist_ok=True)
+        final_path = day_dir / f"{event_id}.mp4"
+        temp_path = day_dir / f"{event_id}_temp.avi"
+        h, w = frames[0].shape[:2]
+        frame_count = 0
+
+        def _apply(frame):
+            if transform is None:
+                return frame
+            try:
+                return transform(frame)
+            except Exception:
+                logger.debug("[LocalStorage] clip transform failed for %s", event_id, exc_info=True)
+                return frame
+
+        try:
+            ffmpeg_ok = False
+            fourcc = cv2.VideoWriter_fourcc(*"MJPG")
+            writer = cv2.VideoWriter(str(temp_path), fourcc, fps, (w, h))
+            for frame in frames:
+                writer.write(_apply(frame))
+                frame_count += 1
+            writer.release()
+
+            ffmpeg_path = getattr(config, "FFMPEG_PATH", "ffmpeg")
+            ffmpeg_preset = str(getattr(config, "FFMPEG_PRESET", "ultrafast") or "ultrafast")
+            ffmpeg_crf = str(int(getattr(config, "FFMPEG_CRF", 28) or 28))
+            ffmpeg_encoder = str(getattr(config, "FFMPEG_ENCODER", "libx264") or "libx264").lower()
+            ffmpeg_nvenc_preset = str(getattr(config, "FFMPEG_NVENC_PRESET", "p3") or "p3")
+            ffmpeg_nvenc_cq = str(int(getattr(config, "FFMPEG_NVENC_CQ", 28) or 28))
+            try:
+                enc_args = _build_ffmpeg_encode_args(
+                    ffmpeg_encoder, ffmpeg_preset, ffmpeg_crf,
+                    ffmpeg_nvenc_preset, ffmpeg_nvenc_cq,
+                )
+                result = subprocess.run(
+                    [
+                        ffmpeg_path, "-y", "-i", str(temp_path),
+                        *enc_args,
+                        "-r", f"{fps:.3f}",
+                        str(final_path),
+                    ],
+                    capture_output=True,
+                    timeout=180,
+                )
+                ffmpeg_ok = result.returncode == 0 and final_path.exists()
+                if not ffmpeg_ok:
+                    stderr_txt = (result.stderr or b"").decode(errors="ignore")
+                    logger.warning("[LocalStorage] FFmpeg stream clip failed: %s", stderr_txt[:300])
+            except Exception as exc:
+                logger.warning("[LocalStorage] FFmpeg stream clip unavailable: %s", exc)
+            finally:
+                if temp_path.exists():
+                    try:
+                        temp_path.unlink()
+                    except OSError:
+                        pass
+
+            if not ffmpeg_ok:
+                fallback_fourcc = cv2.VideoWriter_fourcc(*codec)
+                fallback = cv2.VideoWriter(str(final_path), fallback_fourcc, fps, (w, h))
+                for frame in frames:
+                    fallback.write(_apply(frame))
+                fallback.release()
+                if not final_path.exists():
+                    logger.error("[LocalStorage] stream clip fallback did not create output.")
+                    return None
+
+            logger.info(
+                "[LocalStorage] Stream clip saved: %s (%d frames, %.1fs)",
+                final_path,
+                frame_count,
+                frame_count / max(fps, 0.1),
+            )
+            if allow_s3:
+                s3_url = _upload_to_s3(str(final_path), f"clips/{date_str}/{event_id}.mp4")
+                if s3_url:
+                    return s3_url
+            return str(final_path)
+        except Exception as exc:
+            logger.error("[LocalStorage] Failed to save stream clip: %s", exc)
+            if temp_path.exists():
+                try:
+                    temp_path.unlink()
+                except OSError:
+                    pass
+            return None
+
     # ------------------------------------------------------------------
     # Thumbnails
     # ------------------------------------------------------------------
@@ -583,7 +741,7 @@ class LocalStorage:
         """
         if frame is None:
             return None
-        date_str = datetime.now().strftime("%Y%m%d")
+        date_str = _now_kst().strftime("%Y%m%d")
         day_dir = self.thumbnails_dir / date_str
         day_dir.mkdir(parents=True, exist_ok=True)
         filepath = day_dir / f"{event_id}.jpg"
@@ -619,17 +777,25 @@ class LocalStorage:
     # Flush helpers (used by FlushWorker)
     # ------------------------------------------------------------------
 
-    def get_pending_dates(self) -> List[str]:
-        """Get list of date directories that have events pending flush."""
-        today = datetime.now().strftime("%Y%m%d")
+    def get_pending_dates(self, include_today: bool = False) -> List[str]:
+        """Get list of date directories that have events pending flush.
+
+        Args:
+            include_today: When True, include today's date so callers (e.g. final
+                shutdown flush on spot interruption) can drain the in-progress day.
+        """
+        today = _now_kst().strftime("%Y%m%d")
         dates = []
         for day_dir in sorted(self.events_dir.iterdir()):
-            if (
-                day_dir.is_dir()
-                and day_dir.name < today
-                and not self._is_flushed_date(day_dir.name)
-            ):  # Don't flush today, and don't re-flush already transferred dates.
-                dates.append(day_dir.name)
+            if not day_dir.is_dir():
+                continue
+            name = day_dir.name
+            if self._is_flushed_date(name):
+                continue
+            if name < today:
+                dates.append(name)
+            elif include_today and name == today:
+                dates.append(name)
         return dates
 
     def get_events_for_date(self, date_str: str) -> List[Dict[str, Any]]:

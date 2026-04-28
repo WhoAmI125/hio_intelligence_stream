@@ -1,30 +1,33 @@
-# Model Server (Tier 1 & Tier 2)
-transformers==4.46.3
-torch
-torchvision
-openvino
-google-genai
-opencv-python
-numpy
-Pillow
-requests
-einops
-timm
+# HIO v3 unified runtime requirements
+# Single source for local Windows and g4dn/g4dn-style CUDA deployments.
+# CUDA torch wheels are resolved from the PyTorch cu121 index below.
 
-# Database & Frontend Servers (API & Web)
-fastapi
-uvicorn
-python-multipart
-jinja2
-django  # For migrating existing EpisodeReview models
-# psycopg2-binary  # Uncomment if using PostgreSQL
+--extra-index-url https://download.pytorch.org/whl/cu121
 
-# Evolution (Critic)
-lightgbm
-scikit-learn
-pandas
+torch==2.5.1+cu121
+torchvision==0.20.1+cu121
+torchaudio==2.5.1+cu121
 
-# LoRA Fine-tuning (optional — only needed for training)
-peft>=0.7.0
-datasets
-accelerate
+accelerate==1.13.0
+fastapi==0.136.1
+uvicorn==0.46.0
+python-multipart==0.0.26
+Jinja2==3.1.6
+google-genai==1.73.1
+httpx==0.28.1
+opencv-python==4.13.0.92
+numpy==2.4.3
+pillow==12.1.1
+requests==2.33.1
+ultralytics==8.4.41
+transformers==5.6.2
+huggingface-hub==1.12.0
+tokenizers==0.22.2
+safetensors==0.7.0
+sentencepiece==0.2.1
+protobuf==7.34.1
+psutil==7.2.2
+python-dotenv==1.2.2
+
+# Kept for db_server/models.py compatibility.
+Django==6.0.4

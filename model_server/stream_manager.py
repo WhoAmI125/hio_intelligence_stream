@@ -330,6 +330,19 @@ class CameraStream:
             self._frame_count += 1
             self._frames_read += 1
 
+            # Downsample at ingest to cap CPU and RAM (4 camera / 8 vCPU budget).
+            # Keeps aspect ratio; only shrinks when source taller than cap height.
+            try:
+                from model_server import config as _cfg
+
+                max_h = int(getattr(_cfg, "INGEST_DOWNSAMPLE_HEIGHT", 0) or 0)
+            except Exception:
+                max_h = 0
+            if max_h and frame is not None and frame.shape[0] > max_h:
+                scale = max_h / float(frame.shape[0])
+                new_w = max(2, int(round(frame.shape[1] * scale)))
+                frame = cv2.resize(frame, (new_w, max_h), interpolation=cv2.INTER_AREA)
+
             # FPS tracking
             fps_counter += 1
             elapsed = time.time() - fps_start

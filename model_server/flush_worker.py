@@ -60,6 +60,7 @@ class FlushWorker:
         self._total_flushed = 0
         self._total_failed = 0
         self._last_flush_at: Optional[str] = None
+        self._flush_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Thread lifecycle
@@ -80,10 +81,19 @@ class FlushWorker:
             f"Target={self.db_server_url}{self.flush_endpoint}"
         )
 
-    def stop(self, timeout: float = 5.0) -> None:
+    def stop(self, timeout: float = 5.0, final_flush: bool = True) -> None:
         self._running = False
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=timeout)
+        if final_flush:
+            try:
+                summary = self.flush(include_today=True)
+                logger.info(
+                    "[FlushWorker] Final flush on stop: %s",
+                    summary,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.error("[FlushWorker] Final flush failed: %s", exc)
         logger.info(
             f"[FlushWorker] Stopped. "
             f"Flushed={self._total_flushed}, Failed={self._total_failed}"
@@ -110,38 +120,57 @@ class FlushWorker:
     # Flush logic
     # ------------------------------------------------------------------
 
-    def flush(self) -> Dict[str, Any]:
+    def flush(self, include_today: bool = False) -> Dict[str, Any]:
         """
         Flush all pending date directories to the DB server.
 
+        Args:
+            include_today: When True, also flush today's (still-open) directory.
+                Used for graceful shutdown / spot interruption drain.
+
         Returns summary dict with counts.
         """
-        pending = self.storage.get_pending_dates()
-        if not pending:
-            logger.debug("[FlushWorker] No pending dates to flush.")
-            return {"flushed": 0, "failed": 0}
+        # Serialize flushes to prevent double-counting / archive race between
+        # background loop and /api/vlm/flush-now/ (spot interruption watcher).
+        acquired = self._flush_lock.acquire(blocking=False)
+        if not acquired:
+            logger.info("[FlushWorker] Flush already in progress; skipping concurrent request.")
+            return {"flushed": 0, "failed": 0, "skipped": "lock_busy"}
+        try:
+            pending = self.storage.get_pending_dates(include_today=include_today)
+            if not pending:
+                logger.debug("[FlushWorker] No pending dates to flush.")
+                return {"flushed": 0, "failed": 0}
 
-        flushed = 0
-        failed = 0
+            from datetime import datetime
+            today_str = datetime.now().strftime("%Y%m%d")
 
-        for date_str in pending:
-            success = self._flush_date(date_str)
-            if success:
-                self.storage.archive_date(date_str)
-                flushed += 1
-                self._total_flushed += 1
-            else:
-                failed += 1
-                self._total_failed += 1
+            flushed = 0
+            failed = 0
 
-        from datetime import datetime
-        self._last_flush_at = datetime.now().isoformat()
+            for date_str in pending:
+                success = self._flush_date(date_str)
+                if success:
+                    # Don't mark today as flushed; it may still receive events
+                    # before the process exits. Marking today causes a same-day
+                    # restart to skip flushing remaining events (silent data loss).
+                    if date_str != today_str:
+                        self.storage.archive_date(date_str)
+                    flushed += 1
+                    self._total_flushed += 1
+                else:
+                    failed += 1
+                    self._total_failed += 1
 
-        logger.info(
-            f"[FlushWorker] Flush complete. "
-            f"Flushed={flushed}, Failed={failed}, Dates={pending}"
-        )
-        return {"flushed": flushed, "failed": failed, "dates": pending}
+            self._last_flush_at = datetime.now().isoformat()
+
+            logger.info(
+                f"[FlushWorker] Flush complete. "
+                f"Flushed={flushed}, Failed={failed}, Dates={pending}"
+            )
+            return {"flushed": flushed, "failed": failed, "dates": pending}
+        finally:
+            self._flush_lock.release()
 
     def _flush_date(self, date_str: str) -> bool:
         """Flush a single date's events and clips to DB server with retries."""

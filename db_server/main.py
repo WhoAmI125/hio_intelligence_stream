@@ -95,7 +95,7 @@ def init_db():
             gemini_reason TEXT DEFAULT '',
             tier1_snapshot TEXT DEFAULT '{}',
             router_snapshot TEXT DEFAULT '{}',
-            florence_signals TEXT DEFAULT '{}',
+            proposal_signals TEXT DEFAULT '{}',
             feedback_suggestion TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime'))
         );
@@ -133,17 +133,19 @@ def init_db():
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             camera_id TEXT UNIQUE NOT NULL,
             rtsp_url TEXT NOT NULL,
-            base_fps REAL DEFAULT 1.5,
+            base_fps REAL DEFAULT 3.0,
             rtsp_transport TEXT DEFAULT 'tcp',
             open_timeout_ms INTEGER DEFAULT 8000,
             read_timeout_ms INTEGER DEFAULT 8000,
             event_cooldown_sec INTEGER DEFAULT 20,
             clip_duration_sec INTEGER DEFAULT 10,
-            validation_clip_sec INTEGER DEFAULT 10,
+            validation_clip_sec INTEGER DEFAULT 15,
             evidence_mode TEXT DEFAULT 'video_only',
             use_video_validation INTEGER DEFAULT 1,
             cashier_zone TEXT DEFAULT '[]',
             drawer_zone TEXT DEFAULT '[]',
+            exchange_band TEXT DEFAULT '[]',
+            staff_work_zone TEXT DEFAULT '[]',
             display_name TEXT DEFAULT '',
             created_at TEXT DEFAULT (datetime('now', 'localtime')),
             updated_at TEXT DEFAULT (datetime('now', 'localtime'))
@@ -163,6 +165,14 @@ def init_db():
         conn.execute("ALTER TABLE cameras ADD COLUMN display_name TEXT DEFAULT ''")
         conn.commit()
         logger.info("Migrated cameras table: added display_name column")
+    if "exchange_band" not in _cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN exchange_band TEXT DEFAULT '[]'")
+        conn.commit()
+        logger.info("Migrated cameras table: added exchange_band column")
+    if "staff_work_zone" not in _cols:
+        conn.execute("ALTER TABLE cameras ADD COLUMN staff_work_zone TEXT DEFAULT '[]'")
+        conn.commit()
+        logger.info("Migrated cameras table: added staff_work_zone column")
     conn.close()
     logger.info(f"Database initialized: {DB_PATH}")
 
@@ -206,17 +216,19 @@ class FeedbackRequest(BaseModel):
 class CameraConfigRequest(BaseModel):
     camera_id: str
     rtsp_url: str
-    base_fps: float = 1.5
+    base_fps: float = 3.0
     rtsp_transport: str = "tcp"
     open_timeout_ms: int = 8000
     read_timeout_ms: int = 8000
     event_cooldown_sec: int = 20
     clip_duration_sec: int = 10
-    validation_clip_sec: int = 10
+    validation_clip_sec: int = 15
     evidence_mode: str = "video_only"
     use_video_validation: bool = True
     cashier_zone: list[list[float]] = []
     drawer_zone: list[list[float]] = []
+    exchange_band: list[list[float]] = []
+    staff_work_zone: list[list[float]] = []
     display_name: str = ""
 
 
@@ -256,6 +268,8 @@ def _normalize_zone_points(points: Any) -> list[list[float]]:
 def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
     cashier_zone: list[list[float]] = []
     drawer_zone: list[list[float]] = []
+    exchange_band: list[list[float]] = []
+    staff_work_zone: list[list[float]] = []
     try:
         cashier_zone = _normalize_zone_points(json.loads(row["cashier_zone"] or "[]"))
     except Exception:
@@ -264,6 +278,14 @@ def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         drawer_zone = _normalize_zone_points(json.loads(row["drawer_zone"] or "[]"))
     except Exception:
         drawer_zone = []
+    try:
+        exchange_band = _normalize_zone_points(json.loads(row["exchange_band"] or "[]"))
+    except Exception:
+        exchange_band = []
+    try:
+        staff_work_zone = _normalize_zone_points(json.loads(row["staff_work_zone"] or "[]"))
+    except Exception:
+        staff_work_zone = []
 
     # display_name column may not exist on very old DBs (migration runs at init_db).
     try:
@@ -276,17 +298,19 @@ def _camera_row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
         "camera_id": row["camera_id"],
         "display_name": display_name,
         "rtsp_url": row["rtsp_url"],
-        "base_fps": float(row["base_fps"] or 1.5),
+        "base_fps": float(row["base_fps"] or 3.0),
         "rtsp_transport": row["rtsp_transport"] or "tcp",
         "open_timeout_ms": int(row["open_timeout_ms"] or 8000),
         "read_timeout_ms": int(row["read_timeout_ms"] or 8000),
         "event_cooldown_sec": int(row["event_cooldown_sec"] or 20),
         "clip_duration_sec": int(row["clip_duration_sec"] or 10),
-        "validation_clip_sec": int(row["validation_clip_sec"] or 10),
+        "validation_clip_sec": int(row["validation_clip_sec"] or 15),
         "evidence_mode": row["evidence_mode"] or "video_only",
         "use_video_validation": bool(row["use_video_validation"]),
         "cashier_zone": cashier_zone,
         "drawer_zone": drawer_zone,
+        "exchange_band": exchange_band,
+        "staff_work_zone": staff_work_zone,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
@@ -338,17 +362,19 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
     payload = {
         "camera_id": camera_id,
         "rtsp_url": rtsp_url,
-        "base_fps": float(req.base_fps or 1.5),
+        "base_fps": float(req.base_fps or 3.0),
         "rtsp_transport": (str(req.rtsp_transport or "tcp").strip() or "tcp"),
         "open_timeout_ms": int(req.open_timeout_ms or 8000),
         "read_timeout_ms": int(req.read_timeout_ms or 8000),
         "event_cooldown_sec": int(req.event_cooldown_sec or 20),
         "clip_duration_sec": int(req.clip_duration_sec or 10),
-        "validation_clip_sec": int(req.validation_clip_sec or 10),
+        "validation_clip_sec": int(req.validation_clip_sec or 15),
         "evidence_mode": (str(req.evidence_mode or "video_only").strip() or "video_only"),
         "use_video_validation": 1 if req.use_video_validation else 0,
         "cashier_zone": json.dumps(_normalize_zone_points(req.cashier_zone), ensure_ascii=False),
         "drawer_zone": json.dumps(_normalize_zone_points(req.drawer_zone), ensure_ascii=False),
+        "exchange_band": json.dumps(_normalize_zone_points(req.exchange_band), ensure_ascii=False),
+        "staff_work_zone": json.dumps(_normalize_zone_points(req.staff_work_zone), ensure_ascii=False),
         "display_name": str(req.display_name or "").strip()[:80],
     }
 
@@ -358,8 +384,9 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
         INSERT INTO cameras (
             camera_id, rtsp_url, base_fps, rtsp_transport, open_timeout_ms, read_timeout_ms,
             event_cooldown_sec, clip_duration_sec, validation_clip_sec, evidence_mode,
-            use_video_validation, cashier_zone, drawer_zone, display_name, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
+            use_video_validation, cashier_zone, drawer_zone, exchange_band, staff_work_zone,
+            display_name, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', 'localtime'), datetime('now', 'localtime'))
         ON CONFLICT(camera_id) DO UPDATE SET
             rtsp_url = excluded.rtsp_url,
             base_fps = excluded.base_fps,
@@ -373,6 +400,8 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
             use_video_validation = excluded.use_video_validation,
             cashier_zone = excluded.cashier_zone,
             drawer_zone = excluded.drawer_zone,
+            exchange_band = excluded.exchange_band,
+            staff_work_zone = excluded.staff_work_zone,
             display_name = excluded.display_name,
             updated_at = datetime('now', 'localtime')
         """,
@@ -390,6 +419,8 @@ def _upsert_camera(camera_id: str, req: CameraConfigRequest) -> dict[str, Any]:
             payload["use_video_validation"],
             payload["cashier_zone"],
             payload["drawer_zone"],
+            payload["exchange_band"],
+            payload["staff_work_zone"],
             payload["display_name"],
         ),
     )

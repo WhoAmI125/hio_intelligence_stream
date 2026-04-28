@@ -1,29 +1,22 @@
 [Unit]
-Description=VLM Frontend Server (Jinja2 UI + Reverse Proxy)
-After=network.target vlm-model.service vlm-db.service
+Description=HIO v3 Frontend Server (monitoring UI + reverse proxy)
+After=network-online.target vlm-model.service vlm-db.service
+Wants=network-online.target
 
 [Service]
 Type=simple
-User=vlmapp
-Group=vlmapp
-WorkingDirectory=/home/ubuntu/hio_intelligence_stream
-Environment=PYTHONPATH=/home/ubuntu/hio_intelligence_stream
-Environment=TZ=Asia/Seoul
-EnvironmentFile=/home/ubuntu/hio_intelligence_stream/.env
-
-ExecStart=/home/ubuntu/hio_intelligence_stream/venv/bin/uvicorn \
-    frontend_server.main:app \
-    --host 127.0.0.1 \
-    --port 8002 \
-    --workers 2 \
-    --timeout-keep-alive 65 \
-    --log-level info
-
-Restart=on-failure
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/opt/hio_intelligence_stream_v3
+EnvironmentFile=/opt/hio_intelligence_stream_v3/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/hio_intelligence_stream_v3/.venv/bin/python -m uvicorn frontend_server.main:app --host 0.0.0.0 --port 8002 --workers 1
+Restart=always
 RestartSec=5
-StandardOutput=journal
-StandardError=journal
-SyslogIdentifier=vlm-frontend
+TimeoutStopSec=60
+KillSignal=SIGTERM
+StandardOutput=append:/var/log/hio/frontend.log
+StandardError=append:/var/log/hio/frontend.err
 
 [Install]
 WantedBy=multi-user.target
