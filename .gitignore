@@ -203,10 +203,20 @@ out*.txt
 *.resolved
 
 # =============================================================================
-# Editors / OS
+# Editors / OS / Tooling
 # =============================================================================
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
 desktop.ini
+.claude/
+.aider*
+.cursor*
+
+# =============================================================================
+# Deprecated / one-off utility leftovers
+# =============================================================================
+fix_html.py
+frontend_server/update_js.py
+frontend_server/adhoc_rtsp.html
